@@ -34,6 +34,7 @@ from functools import lru_cache
 sys.dont_write_bytecode = True
 
 from bambu_mixer_model import blend_color_multi as bambu_blend_color_multi
+from standard_3mf_import import import_colored_3mf_project
 
 BAMBU_PLA = [
     ("PLA Matte Ivory White", "#FFFFFF"),
@@ -1485,9 +1486,41 @@ def project_mesh_metrics(archive):
         "previewBuildEstimateSeconds":preview_seconds,
     }
 
+def stage_standard_colored_3mf(source, destination, progress=None):
+    """Translate standard 3MF color groups into Bambu-compatible facet paint."""
+    return import_colored_3mf_project(
+        source, destination,
+        kmeans_colors=kmeans_colors,
+        paint_code_for_slot=paint_code_for_slot,
+        basic_project_settings=basic_project_settings,
+        color_distance=dist,
+        max_paint_slots=MAX_BAMBU_PAINT_SLOT,
+        max_faces=MAX_IMPORT_FACES,
+        progress=progress,
+    )
+
+
+def is_standard_colored_3mf(path):
+    """Do not modify existing native Bambu Studio project imports."""
+    with zipfile.ZipFile(path) as archive:
+        validated_archive_infos(archive)
+        return find_project_settings(archive.namelist()) is None
+
+
 def inspect_project(infile, thumbnail_dest=None, preview_mesh_dest=None, mix_model="bambu", texture_override=None,
                     progress=lambda fraction,message: None, metadata_only=False):
     infile=Path(infile).expanduser().resolve()
+    if infile.suffix.lower()==".3mf" and is_standard_colored_3mf(infile):
+        temporary=Path(tempfile.mkdtemp(prefix="fsinspectimport_"))
+        try:
+            staged=temporary/f"{infile.stem}_colored_source.3mf"
+            imported=stage_standard_colored_3mf(infile,staged,progress)
+            result=inspect_project(staged,thumbnail_dest,preview_mesh_dest,mix_model,
+                                   texture_override,progress,metadata_only)
+            result.update({"input":str(infile),"filename":infile.name,"import":imported,"previewCache":None})
+            return result
+        finally:
+            shutil.rmtree(temporary,ignore_errors=True)
     if infile.suffix.lower() in (".obj",".glb"):
         temporary=Path(tempfile.mkdtemp(prefix="fsinspectimport_"))
         try:
@@ -3416,6 +3449,21 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
     catalog_source_label=None
     try:
         progress(0.04,f"Opening {infile.name}")
+        if infile.suffix.lower()==".3mf" and is_standard_colored_3mf(infile):
+            progress(0.06,"Importing standard 3MF material colors")
+            project_file=import_tmp/f"{infile.stem}_colored_source.3mf"
+            imported=stage_standard_colored_3mf(infile,project_file,progress)
+            if imported["compressedForBambu"]:
+                warnings.append(
+                    f"Source contains {imported['internalColorCount']} RGB colors; "
+                    f"the intermediate project uses {imported['exportColorCount']} paint colors "
+                    "(source color quantization; not all original shades are preserved)."
+                )
+            if imported["perVertexColorFacesApproximated"]:
+                warnings.append(
+                    f"{imported['perVertexColorFacesApproximated']} triangles had different vertex colors; "
+                    "their colors were approximated as one face color."
+                )
         if infile.suffix.lower() in (".obj",".glb"):
             progress(0.06,f"Importing textured {infile.suffix[1:].upper()} geometry, UV mapping and texture colors")
             project_file=import_tmp/f"{infile.stem}_painted_source.3mf"

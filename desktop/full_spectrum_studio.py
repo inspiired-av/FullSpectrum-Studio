@@ -671,7 +671,7 @@ class StudioApp(tk.Tk):
         source = Path(self.project.get())
         if not source.is_file() or source.suffix.lower() not in (".3mf", ".obj", ".glb"):
             if not automatic:
-                messagebox.showerror("FullSpectrum Studio", "Choose a painted Bambu .3mf or textured OBJ / GLB source first.")
+                messagebox.showerror("FullSpectrum Studio", "Choose a colored .3mf or textured OBJ / GLB source first.")
             return
         if self.source.get() == "custom" and not Path(self.custom.get()).is_file():
             if not automatic:
