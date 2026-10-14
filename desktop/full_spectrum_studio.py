@@ -32,7 +32,10 @@ from desktop.app_support import (
 )
 from desktop.filament_options import selectable_filament_options
 from desktop.settings_store import load_settings, save_settings
-from desktop.source_path_utils import same_source_path
+from orca_profile_warning import orca_h2c_warning
+from native_project_template import inspect_template, TemplateError
+from desktop.slicer_launcher import find_windows_slicer
+from desktop.source_path_utils import same_source_path, find_original_material_source
 from desktop.windows_mesh_preview import MeshPreviewCanvas
 from desktop.source_color_preview import read_standard_color_mesh
 
@@ -62,18 +65,24 @@ class StudioApp(tk.Tk):
         self.reference = tk.StringVar()
         self.texture = tk.StringVar()
         self.custom = tk.StringVar()
+        self.native_project_template = tk.StringVar()
+        self.native_template_status = tk.StringVar(value="No template selected")
+        self.slicer_compatibility_status = tk.StringVar(value="")
         self.strategy = tk.StringVar(value="official")
         self.planner_mode = tk.StringVar(value="best")
         self.planning_sample = tk.StringVar(value="preview")
         self.source = tk.StringVar(value="inventory")
         self.catalog_region = tk.StringVar(value="global")
         self.real_slots = tk.StringVar(value="auto")
+        self.max_output_colors = tk.StringVar(value="auto")
         self.mix_model = tk.StringVar(value="bambu")
         self.quality_bias = tk.IntVar(value=60)
         self.smart_quality = tk.BooleanVar(value=True)
         self.auto_preview = tk.BooleanVar(value=True)
         self.auto_open = tk.BooleanVar(value=True)
         self.output_application = tk.StringVar(value="Bambu Studio")
+        self.slicer_executable_paths = {"bambu_studio_executable": "", "orcaslicer_executable": ""}
+        self.slicer_target_label = tk.StringVar(value="Automatic executable detection")
         self.progress = tk.DoubleVar(value=0)
         self.status = tk.StringVar(value="Choose a painted .3mf or textured OBJ / GLB source to begin.")
         self.cancel_requested = False
@@ -112,25 +121,31 @@ class StudioApp(tk.Tk):
         settings = load_settings()
         fields = (
             "custom", "strategy", "planner_mode", "planning_sample", "source",
-            "catalog_region", "real_slots", "mix_model", "quality_bias",
+            "catalog_region", "real_slots", "max_output_colors", "mix_model", "quality_bias",
             "smart_quality", "auto_preview", "auto_open", "output_application",
+            "native_project_template",
         )
         for field in fields:
             if field in settings:
                 getattr(self, field).set(settings[field])
         self.disabled_anchor_keys = set(settings.get("disabled_anchor_keys", []))
         self.pinned_anchor_keys = set(settings.get("pinned_anchor_keys", []))
+        self._refresh_native_template_status()
+        for key in self.slicer_executable_paths:
+            self.slicer_executable_paths[key] = settings.get(key, "")
 
     def save_user_settings(self):
         """Persist settings to the user's config directory; do not bundle models."""
         fields = (
             "custom", "strategy", "planner_mode", "planning_sample", "source",
-            "catalog_region", "real_slots", "mix_model", "quality_bias",
+            "catalog_region", "real_slots", "max_output_colors", "mix_model", "quality_bias",
             "smart_quality", "auto_preview", "auto_open", "output_application",
+            "native_project_template",
         )
         settings = {field: getattr(self, field).get() for field in fields}
         settings["disabled_anchor_keys"] = sorted(self.disabled_anchor_keys)
         settings["pinned_anchor_keys"] = sorted(self.pinned_anchor_keys)
+        settings.update(self.slicer_executable_paths)
         try:
             save_settings(settings)
         except OSError as error:
@@ -196,6 +211,21 @@ class StudioApp(tk.Tk):
             ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
             ttk.Button(row, text="Browse", command=action).pack(side="left", padx=(8, 0))
 
+        # A native project template carries the printer/process/plate profile,
+        # separately from the custom filament palette used by the color planner.
+        ttk.Label(frame, text="Native Project Template (.3mf)", style="Small.TLabel").pack(anchor="w", pady=(12, 3))
+        template_row = ttk.Frame(frame)
+        template_row.pack(fill="x")
+        ttk.Entry(template_row, textvariable=self.native_project_template).pack(side="left", fill="x", expand=True)
+        ttk.Button(template_row, text="Browse", command=self.choose_native_template).pack(side="left", padx=(8, 0))
+        template_actions = ttk.Frame(frame)
+        template_actions.pack(fill="x", pady=(4, 0))
+        ttk.Button(template_actions, text="About templates", command=self.show_native_template_help).pack(side="left")
+        ttk.Button(template_actions, text="Clear", command=self.clear_native_template).pack(side="left", padx=(7, 0))
+        ttk.Label(frame, textvariable=self.native_template_status, style="Small.TLabel", wraplength=400).pack(anchor="w", pady=(5, 0))
+        ttk.Label(frame, textvariable=self.slicer_compatibility_status,
+                  style="Warning.TLabel", wraplength=400, justify="left").pack(anchor="w", pady=(2, 0))
+
         ttk.Separator(frame).pack(fill="x", pady=18)
         ttk.Label(frame, text="PLAN", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
         choices = ttk.Frame(frame)
@@ -206,6 +236,14 @@ class StudioApp(tk.Tk):
         self.combo(choices, "Physical slots", self.real_slots, ["auto", "2", "3", "4", "5", "6", "7", "8"], 0, 1)
         self.combo(choices, "Catalog region", self.catalog_region, ["global", "eu", "us-ca", "uk", "au-nz", "asia"], 1, 1)
         self.combo(choices, "Planning sample", self.planning_sample, ["paint", "preview"], 2, 1)
+        limit_row=ttk.Frame(frame)
+        limit_row.pack(fill="x", pady=(0, 7))
+        ttk.Label(limit_row, text="Max output colors", style="Small.TLabel").pack(side="left")
+        ttk.Combobox(limit_row, textvariable=self.max_output_colors,
+                     values=["auto"]+[str(i) for i in range(2,33)],
+                     state="readonly", width=8).pack(side="left", padx=(9, 8))
+        ttk.Label(limit_row, text="total physical + mixed; up to 32",
+                  style="Small.TLabel").pack(side="left")
 
         filament_row = ttk.Frame(frame)
         filament_row.pack(fill="x", pady=(2, 10))
@@ -229,6 +267,12 @@ class StudioApp(tk.Tk):
             handoff, textvariable=self.output_application,
             values=["Bambu Studio", "OrcaSlicer"], state="readonly", width=18
         ).pack(side="left", padx=(8, 0))
+        # Explicit build selection supports standalone/portable and nightly slicers.
+        slicer_target_row = ttk.Frame(frame)
+        slicer_target_row.pack(fill="x", pady=(0, 8))
+        ttk.Button(slicer_target_row, text="Choose slicer EXE", command=self.choose_slicer_executable).pack(side="left")
+        ttk.Button(slicer_target_row, text="Auto", command=self.reset_slicer_executable).pack(side="left", padx=(6, 0))
+        ttk.Label(frame, textvariable=self.slicer_target_label, style="Small.TLabel").pack(anchor="w", pady=(0, 10))
 
         slider = ttk.Frame(frame)
         slider.pack(fill="x", pady=(0, 14))
@@ -307,6 +351,9 @@ class StudioApp(tk.Tk):
         ttk.Label(right, text="EXPECTED PALETTE", style="Section.TLabel").pack(anchor="w", pady=(7, 6))
         self.palette_canvas = tk.Canvas(right, height=44, bg="#151719", highlightthickness=0)
         self.palette_canvas.pack(fill="x")
+        self.palette_allocation_status = tk.StringVar(value="")
+        ttk.Label(right, textvariable=self.palette_allocation_status,
+                  style="Small.TLabel").pack(anchor="w", pady=(0, 5))
         self.gap_message = tk.StringVar(value="")
         gap_row = ttk.Frame(right)
         gap_row.pack(fill="x", pady=(5, 8))
@@ -323,14 +370,18 @@ class StudioApp(tk.Tk):
         watched = [
             self.project, self.reference, self.texture, self.custom, self.strategy,
             self.planner_mode, self.planning_sample, self.source, self.catalog_region,
-            self.real_slots, self.quality_bias, self.smart_quality,
+            self.real_slots, self.max_output_colors, self.quality_bias, self.smart_quality,
         ]
         for variable in watched:
             variable.trace_add("write", self.schedule_auto_preview)
         self.auto_preview.trace_add("write", self.schedule_auto_preview)
         self.project.trace_add("write", self._clear_model_solid_overrides)
+        self.output_application.trace_add("write", self._refresh_slicer_target_label)
+        self.output_application.trace_add("write", self._refresh_slicer_compatibility_warning)
         self.source.trace_add("write", self._update_filament_selection_summary)
         self.custom.trace_add("write", self._update_filament_selection_summary)
+        self._refresh_slicer_target_label()
+        self._refresh_slicer_compatibility_warning()
 
     def combo(self, parent, title, variable, values, column, row=0):
         parent.columnconfigure(column, weight=1)
@@ -361,10 +412,37 @@ class StudioApp(tk.Tk):
             return
         try:
             if not ENGINE.is_standard_colored_3mf(source):
-                raise ValueError(
-                    "Protected solid colors currently support standard 3MF material colors, "
-                    "not Bambu paint states"
+                original = find_original_material_source(
+                    source, ENGINE.is_standard_colored_3mf
                 )
+                if original is None:
+                    raise ValueError(
+                        "This SOURCE is a slicer-native or FullSpectrum-generated 3MF, "
+                        "not an original material-colored 3MF.\n\n"
+                        f"Selected: {source.name}\n\n"
+                        "Protect Solid Colors currently needs the original "
+                        "material-colored source (for example, "
+                        "VSLA v4_SOLID_NoFilter.3mf). Choose it under "
+                        "'Painted 3MF or textured model'.\n\n"
+                        "Keep your H2C Bambu/Orca blank project under "
+                        "'Native Project Template'. That template is not a "
+                        "source model and does not disable solid-color protection."
+                    )
+                if not messagebox.askyesno(
+                    "Use original colored 3MF?",
+                    "You selected a FullSpectrum-generated project rather "
+                    "than its original material-colored model.\n\n"
+                    f"Current: {source.name}\n"
+                    f"Original: {original.name}\n\n"
+                    "Switch SOURCE to the original so Protect Solid Colors "
+                    "can use the exact imported colors?\n\n"
+                    "Your Native Project Template selection will be retained.",
+                    parent=self,
+                ):
+                    return
+                self.project.set(str(original))
+                self.load_source_thumbnail(str(original))
+                source = original
             options = [
                 item for item in self._filament_options()
                 if item["key"] not in self.disabled_anchor_keys
@@ -840,6 +918,13 @@ class StudioApp(tk.Tk):
         self.slots_value.set(forecast["slotSummary"])
         self._draw_accuracy(score)
         self._draw_palette(forecast["colors"])
+        requested = self.max_output_colors.get()
+        count = len(result.get("outputColors") or forecast["colors"])
+        if requested == "auto":
+            self.palette_allocation_status.set(f"Using {count} total colors (Auto)")
+        else:
+            detail = "All allowed slots used" if count == int(requested) else "Only useful printable recipes added"
+            self.palette_allocation_status.set(f"Using {count}/{requested} total colors — {detail}")
 
         suggestion = forecast["suggestion"]
         self.forecast_suggestion = suggestion
@@ -1026,6 +1111,71 @@ class StudioApp(tk.Tk):
         if path:
             self.texture.set(path)
 
+    def _refresh_slicer_compatibility_warning(self, *_):
+        path = self.native_project_template.get().strip()
+        message = ""
+        if path:
+            try:
+                details = inspect_template(path)
+                message = orca_h2c_warning(details, self.output_application.get())
+            except (OSError, ValueError, TemplateError):
+                pass  # Invalid templates already have their own visible status.
+        self.slicer_compatibility_status.set(message)
+
+    def _refresh_native_template_status(self):
+        self._refresh_slicer_compatibility_warning()
+        value=self.native_project_template.get().strip()
+        if not value:
+            self.native_template_status.set("No template selected (required to compose generic colored 3MF)")
+            return
+        try:
+            info=inspect_template(value)
+        except (TemplateError, OSError, ValueError) as exc:
+            self.native_template_status.set(f"Invalid template: {exc}")
+            return
+        self.native_template_status.set(
+            f"{info['slicer']} {info['slicerVersion']} | {info['printerPreset']} | "
+            f"{info['nozzle']} mm | {info['processPreset']}"
+        )
+
+    def choose_native_template(self):
+        name=filedialog.askopenfilename(
+            parent=self, title="Choose a blank native Bambu/Orca 3MF project",
+            filetypes=[("Native slicer projects", "*.3mf")],
+        )
+        if not name:
+            return
+        try:
+            info=inspect_template(name)
+        except (TemplateError, OSError, ValueError) as exc:
+            messagebox.showerror("Invalid native template", str(exc), parent=self)
+            return
+        self.native_project_template.set(info['path'])
+        self._refresh_native_template_status()
+        self.status.set("Native slicer template selected; Save Settings to remember it.")
+
+    def clear_native_template(self):
+        self.native_project_template.set("")
+        self._refresh_native_template_status()
+
+    def show_native_template_help(self):
+        messagebox.showinfo(
+            "About native project templates",
+            "A template is an EMPTY .3mf project saved using Bambu Studio or OrcaSlicer.\n\n"
+            "To create one:\n"
+            "1. Select your printer, nozzle, build plate, and process settings in your slicer.\n"
+            "2. Remove every model from the plate.\n"
+            "3. Save the empty project as a .3mf.\n"
+            "4. Select it here and use Compose Palette.\n\n"
+            "FullSpectrum combines the imported mesh and computed mixed-filament recipes "
+            "with the template's native printer and process settings. "
+            "It never overwrites the original template.\n\n"
+            "A separate filament JSON library still controls the colors you can plan with. "
+            "Review printer/nozzle/material settings and mixed recipes in the slicer before printing. "
+            "This feature currently applies to generic colored 3MF, OBJ, and GLB imports.",
+            parent=self,
+        )
+
     def choose_custom(self):
         path = filedialog.askopenfilename(filetypes=[("JSON filament library", "*.json")])
         if path:
@@ -1079,11 +1229,13 @@ class StudioApp(tk.Tk):
             "planner_mode": self.planner_mode.get(),
             "planning_sample": self.planning_sample.get(),
             "real_slots": self.real_slots.get(),
+            "max_output_colors": self.max_output_colors.get(),
             "quality_bias": "auto" if self.smart_quality.get() else self.quality_bias.get(),
             "mix_model": self.mix_model.get(),
             "reference": self.reference.get() or None,
             "texture": self.texture.get() or None,
             "custom": self.custom.get() or None,
+            "native_project_template": self.native_project_template.get().strip() or None,
             "auto_open": self.auto_open.get(),
             "output_application": self.output_application.get(),
             "allowed_anchor_keys": sorted(option_keys - disabled_keys) if disabled_keys else None,
@@ -1113,8 +1265,10 @@ class StudioApp(tk.Tk):
                 output_dir=source.parent,
                 reveal=False,
                 real_slots=options["real_slots"],
+                max_output_colors=options["max_output_colors"],
                 reference=options["reference"],
                 custom_catalog_path=options["custom"],
+                native_template_path=options["native_project_template"],
                 texture_override=options["texture"],
                 quality_bias=options["quality_bias"],
                 catalog_region=options["catalog_region"],
@@ -1150,7 +1304,7 @@ class StudioApp(tk.Tk):
             self.last_output = result["output"]
             self.after(0, lambda: self.finish(result, "\n".join(text)))
             if options["auto_open"]:
-                self.open_validated_output(result["output"], options["output_application"])
+                self.after(0, self.open_validated_output, result["output"], options["output_application"])
         
         except Exception as error:
             details = "".join(traceback.format_exception(type(error), error, error.__traceback__))
@@ -1306,28 +1460,122 @@ class StudioApp(tk.Tk):
         else:
             subprocess.run(["open", "-R", output])
 
+    def _current_slicer_executable_key(self):
+        return ("bambu_studio_executable" if self.output_application.get() == "Bambu Studio"
+                else "orcaslicer_executable")
+
+    def _refresh_slicer_target_label(self, *_):
+        selection = self.slicer_executable_paths.get(self._current_slicer_executable_key(), "")
+        if selection:
+            self.slicer_target_label.set(f"Selected: {Path(selection).name} (custom path)")
+        else:
+            self.slicer_target_label.set("Automatic executable detection")
+
+    def choose_slicer_executable(self):
+        """Pick a specific installed, standalone or nightly build for this slicer."""
+        if os.name != "nt":
+            messagebox.showinfo("Slicer selection", "Custom executable selection is currently available on Windows.", parent=self)
+            return
+        application = self.output_application.get()
+        if application not in ("Bambu Studio", "OrcaSlicer"):
+            return
+        filename = filedialog.askopenfilename(
+            parent=self, title=f"Choose {application} executable (nightly / portable supported)",
+            filetypes=[("Windows executables", "*.exe"), ("All files", "*.*")],
+        )
+        if not filename:
+            return
+        candidate = Path(filename).expanduser()
+        if not candidate.is_file() or candidate.suffix.lower() != ".exe":
+            messagebox.showerror("Invalid slicer executable", "Select an existing .exe file.", parent=self)
+            return
+        self.slicer_executable_paths[self._current_slicer_executable_key()] = str(candidate.resolve())
+        self._refresh_slicer_target_label()
+        self.status.set(f"Using custom {application} executable. Click Save Settings to remember this version.")
+
+    def reset_slicer_executable(self):
+        """Return this application to automatic installed-slicer lookup."""
+        self.slicer_executable_paths[self._current_slicer_executable_key()] = ""
+        self._refresh_slicer_target_label()
+        self.status.set("Using automatic slicer discovery. Click Save Settings to remember this choice.")
+
     def open_validated_output(self, output, application):
-        if application != "OrcaSlicer":
-            os.startfile(output) if os.name == "nt" else subprocess.run(["open", output])
+        """Open the validated 3MF in the chosen slicer, not the OS default viewer."""
+        output = str(Path(output).expanduser().resolve())
+        if application not in ("Bambu Studio", "OrcaSlicer"):
+            messagebox.showerror("Unknown slicer", f"Unsupported output application: {application}")
             return
+
         if os.name == "nt":
-            possible = [
-                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "OrcaSlicer" / "orca-slicer.exe",
-                Path(os.environ.get("ProgramFiles", "")) / "OrcaSlicer" / "orca-slicer.exe",
-                Path(os.environ.get("ProgramFiles", "")) / "OrcaSlicer" / "OrcaSlicer.exe",
-            ]
-            executable = next((str(path) for path in possible if path.is_file()), None) or shutil.which("orca-slicer")
-            if executable:
-                subprocess.Popen([executable, output])
-                return
-        elif shutil.which("open") and subprocess.run(["open", "-Ra", "OrcaSlicer"]).returncode == 0:
-            subprocess.Popen(["open", "-a", "OrcaSlicer", output])
+            key = ("bambu_studio_executable" if application == "Bambu Studio"
+                   else "orcaslicer_executable")
+            configured = self.slicer_executable_paths.get(key, "")
+            if configured:
+                executable = Path(configured)
+                if not executable.is_file():
+                    messagebox.showwarning(
+                        "Selected slicer unavailable",
+                        f"The selected executable no longer exists:\n{configured}\nChoose a replacement executable.",
+                        parent=self,
+                    )
+                    self.choose_slicer_executable()
+                    configured = self.slicer_executable_paths.get(key, "")
+                    executable = Path(configured) if configured else None
+                    if executable is None or not executable.is_file():
+                        return
+            else:
+                executable = find_windows_slicer(application)
+            if executable is None:
+                # Portable or custom-location installations are common. This
+                # dialog must run on Tk's main thread, not the conversion worker.
+                selected = filedialog.askopenfilename(
+                    parent=self,
+                    title=f"Locate {application} executable",
+                    filetypes=[("Windows applications", "*.exe"), ("All files", "*.*")],
+                )
+                if not selected:
+                    messagebox.showwarning(
+                        f"{application} not found",
+                        "The output 3MF was saved successfully, but the selected slicer "
+                        "could not be located. You can open the file from the slicer manually.",
+                        parent=self,
+                    )
+                    return
+                executable = Path(selected)
+                if not executable.is_file():
+                    messagebox.showerror("Invalid slicer path", "The selected executable does not exist.", parent=self)
+                    return
+            try:
+                subprocess.Popen([str(executable), output], cwd=str(executable.parent))
+            except OSError as error:
+                messagebox.showerror(
+                    f"Could not open {application}",
+                    f"The 3MF was saved, but the slicer could not be launched:\n{error}",
+                    parent=self,
+                )
             return
-        self.after(0, lambda: messagebox.showwarning(
-            "OrcaSlicer not found",
-            "The validated output was saved, but OrcaSlicer was not found. Install OrcaSlicer or open the .3mf manually."
-        ))
+
+        # On macOS, force the chosen application instead of the default viewer.
+        app_names = ("BambuStudio", "Bambu Studio") if application == "Bambu Studio" else ("OrcaSlicer", "Orca Slicer")
+        for app_name in app_names:
+            lookup = subprocess.run(["open", "-Ra", app_name], capture_output=True)
+            if lookup.returncode == 0:
+                try:
+                    subprocess.Popen(["open", "-a", app_name, output])
+                except OSError as error:
+                    messagebox.showerror(f"Could not open {application}", str(error), parent=self)
+                return
+        messagebox.showwarning(
+            f"{application} not found",
+            "The output 3MF was saved successfully, but the selected slicer "
+            "could not be found. Open the file manually in your slicer.",
+            parent=self,
+        )
 
 
 if __name__ == "__main__":
     StudioApp().mainloop()
+
+# Native output-colors/thumbnail patch v1
+
+# Palette and Orca H2C warning patch v2

@@ -24,3 +24,28 @@ def same_source_path(first, second):
         return Path(left).expanduser().resolve(strict=False) == Path(right).expanduser().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return False
+
+
+from zipfile import BadZipFile
+
+def find_original_material_source(selected, is_standard_colored):
+    """Return adjacent original material-colored 3MF for a FullSpectrum output.
+
+    Only infer the original from FullSpectrum's explicit output filename marker.
+    Do not silently treat converted Bambu paint states as original material colors.
+    The callable must verify that the candidate is an actual standard colored 3MF.
+    """
+    path = Path(selected)
+    if path.suffix.lower() != ".3mf":
+        return None
+    marker = "_FullSpectrum_"
+    prefix, sep, _ = path.stem.partition(marker)
+    if not sep or not prefix:
+        return None
+    candidate = path.with_name(prefix + path.suffix)
+    if not candidate.is_file():
+        return None
+    try:
+        return candidate if is_standard_colored(candidate) else None
+    except (OSError, ValueError, RuntimeError, BadZipFile):
+        return None

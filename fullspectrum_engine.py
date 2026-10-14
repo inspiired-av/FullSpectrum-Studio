@@ -35,6 +35,7 @@ sys.dont_write_bytecode = True
 
 from bambu_mixer_model import blend_color_multi as bambu_blend_color_multi
 from standard_3mf_import import import_colored_3mf_project, source_color_counts
+from native_project_template import inspect_template, graft_native_project
 from solid_color_overrides import (normalize_solid_overrides, require_protected_slots,
                                    solid_anchor_choice)
 
@@ -2543,10 +2544,26 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
         trials.append((weighted+physical_penalty,weighted,anchors))
     return min(trials,key=lambda trial:trial[0])[2]
 
+def normalize_max_output_colors(value):
+    """Auto uses existing mix heuristics; explicit size limits TOTAL paint slots."""
+    if value is None or value == "auto":
+        return "auto"
+    if isinstance(value, bool) or not str(value).isdigit():
+        raise RuntimeError("Max output colors must be 'auto' or an integer from 2 to 32")
+    count=int(value)
+    if not MIN_REAL_SLOTS <= count <= MAX_BAMBU_PAINT_SLOT:
+        raise RuntimeError("Max output colors must be between 2 and 32 total filament slots")
+    return count
+
+
 def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_BIAS,
-                  mix_model="bambu", planner_mode="best", protected_slots=None):
+                  mix_model="bambu", planner_mode="best", protected_slots=None,
+                  max_output_colors="auto"):
     planner_mode=normalize_planner_mode(planner_mode)
     real_count=len(anchors)
+    requested_output=normalize_max_output_colors(max_output_colors)
+    if requested_output != "auto" and requested_output < real_count:
+        raise RuntimeError(f"Max output colors ({requested_output}) must be at least the {real_count} physical slots")
     newc=[anchor_color(anchor) for anchor in anchors]
     ism=["0"]*real_count; comps=[""]*real_count; ratios=[""]*real_count
     old_slot_to_new_slot={}
@@ -2561,6 +2578,11 @@ def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_
     max_unique_mixes=max(2,min(MAX_BAMBU_PAINT_SLOT-real_count,3+round(quality_bias/6)))
     if high_fidelity:
         max_unique_mixes=max(max_unique_mixes,min(MAX_BAMBU_PAINT_SLOT-real_count,8+round(quality_bias/4)))
+    if requested_output != "auto":
+        # Explicit cap: make room for useful extra distinct recipes, rather
+        # than silently imposing the Auto heuristic cap at ~20 mixes.
+        max_unique_mixes=requested_output-real_count
+        min_gain=min(min_gain,0.15)
     mix_candidates=[]
     protected_slots=protected_slots or {}
     for old_slot,target in enumerate(old_colors, start=1):
@@ -2586,7 +2608,8 @@ def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_
         old_slot_to_new_slot[old_slot]=direct_slot
         rows_by_slot[old_slot]=[old_slot,direct_slot,target,"ANCHOR",direct_name,"","",
                                 direct_hex,f"{direct_err:.2f}",f"{direct_err:.2f}","0.00"]
-        if weight>0 and direct_err>DIRECT_ANCHOR_DE and gain>=min_gain and mix_err<=mix_limit:
+        if (weight>0 and direct_err>(DIRECT_ANCHOR_DE if requested_output=="auto" else 0.25)
+                and gain>=min_gain and mix_err<=mix_limit):
             mix_candidates.append((gain*weight,gain,old_slot,target,cs,rs,preview,mix_err,direct_err))
     recipes={}
     for _,gain,old_slot,target,cs,rs,preview,mix_err,direct_err in sorted(mix_candidates,reverse=True):
@@ -2960,7 +2983,8 @@ def append_unique_quality(queue, seen, values, allowed=None):
 def select_smart_palette(old_colors, usage, mode, inventory, palette_source, real_slots="auto",
                          custom_catalog_path=None, reference=None, mix_model="bambu", planner_mode="best",
                          progress=None, material_families=None, pinned_anchor_keys=None,
-                         allowed_anchor_keys=None, protected_slots=None):
+                         allowed_anchor_keys=None, protected_slots=None,
+                         max_output_colors="auto"):
     planner_mode=normalize_planner_mode(planner_mode)
     candidates=list(SMART_QUALITY_CANDIDATES)
     if mode=="cmykw":
@@ -2970,7 +2994,8 @@ def select_smart_palette(old_colors, usage, mode, inventory, palette_source, rea
     errors=[]
     skipped=[]
     evaluated=set()
-    queue=[SMART_QUALITY_PROBE if SMART_QUALITY_PROBE in candidates else candidates[len(candidates)//2]]
+    queue=([100, 85, 70, 50] if max_output_colors != "auto" else
+           [SMART_QUALITY_PROBE if SMART_QUALITY_PROBE in candidates else candidates[len(candidates)//2]])
     max_candidates=4 if mode!="cmykw" else 5
     attempt_index=0
     while queue and attempt_index < max_candidates:
@@ -2993,12 +3018,17 @@ def select_smart_palette(old_colors, usage, mode, inventory, palette_source, rea
                 material_families,pinned_anchor_keys,allowed_anchor_keys
             )
             palette=build_palette(old_colors,anchors,usage,quality_bias,mix_model,planner_mode,
-                                  protected_slots=protected_slots)
+                                  protected_slots=protected_slots,
+                                  max_output_colors=max_output_colors)
             rows=palette[-1]
             metrics=quality_metrics(rows,usage,old_colors,reference,mix_model)
             mixed_slots,mixed_share,_=palette_usage_stats(rows,usage,quality_bias)
             output_count=len(palette[0])
             score=smart_quality_plan_score(metrics,rows,usage,len(anchors),output_count,quality_bias)
+            # Keep the displayed/diagnostic quality score meaningful; the
+            # explicit limit only changes which candidate is selected.
+            candidate_rank = ((0, score) if max_output_colors == "auto"
+                              else (-output_count, score))
             summary={
                 "qualityBias":quality_bias,
                 "realSlots":len(anchors),
@@ -3016,9 +3046,10 @@ def select_smart_palette(old_colors, usage, mode, inventory, palette_source, rea
                     done_progress,
                     f"Quality {quality_bias}/100 candidate: {len(anchors)} physical, {mixed_slots} mixed, mean Delta E {metrics['estimatedDeltaE']:.2f}"
                 )
-            if best is None or score<best["score"]:
+            if best is None or candidate_rank<best["rank"]:
                 best={
                     "score":score,
+                    "rank":candidate_rank,
                     "qualityBias":quality_bias,
                     "anchors":anchors,
                     "palette":palette,
@@ -3481,14 +3512,29 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             internal_colors=48, catalog_region="global", planner_mode="best",
             planning_sample="paint", plan_only=False, material_families=None,
             pinned_anchor_keys=None, allowed_anchor_keys=None, preview_cache=None,
-            progress=lambda fraction,message: None, solid_color_overrides=None):
+            progress=lambda fraction,message: None, solid_color_overrides=None,
+            native_template_path=None, max_output_colors="auto"):
     infile=Path(infile).expanduser().resolve()
+    generic_input=(infile.suffix.lower() in (".obj", ".glb") or
+                   (infile.suffix.lower()==".3mf" and is_standard_colored_3mf(infile)))
+    if generic_input and not plan_only and not native_template_path:
+        raise RuntimeError(
+            "Standard colored 3MF/OBJ/GLB conversion requires a blank native project template. "
+            "Choose one in SOURCE (saved from Bambu Studio or OrcaSlicer)."
+        )
+    if native_template_path and not generic_input and not plan_only:
+        raise RuntimeError(
+            "Native Project Template is intended for standard colored 3MF/OBJ/GLB imports. "
+            "This input is already a native slicer project; clear the template to preserve its profile."
+        )
+    template_details=inspect_template(native_template_path) if native_template_path else None
     planner_mode=normalize_planner_mode(planner_mode)
     planning_sample=normalize_planning_sample(planning_sample)
     material_families=normalize_material_families(material_families)
     pinned_anchor_keys=normalize_anchor_keys(pinned_anchor_keys)
     allowed_anchor_keys=normalize_anchor_keys(allowed_anchor_keys)
     solid_color_overrides=normalize_solid_overrides(solid_color_overrides)
+    max_output_colors=normalize_max_output_colors(max_output_colors)
     if solid_color_overrides:
         if infile.suffix.lower() != ".3mf" or not is_standard_colored_3mf(infile):
             raise ValueError("Protected solid source colors currently require a standard colored 3MF")
@@ -3661,7 +3707,8 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             plan=select_smart_palette(
                 old,usage,mode,inventory,palette_source,real_slots,
                 custom_catalog_path,reference_result,mix_model,planner_mode,progress,
-                material_families,pinned_anchor_keys,allowed_anchor_keys,protected_slots
+                material_families,pinned_anchor_keys,allowed_anchor_keys,protected_slots,
+                max_output_colors=max_output_colors
             )
             quality_bias=plan["qualityBias"]
             anchors=plan["anchors"]
@@ -3681,10 +3728,16 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             progress(0.34,"Building mixes with useful predicted visual gain")
             newc,ism,comps,ratios,old_slot_to_new_slot,rows=build_palette(
                 old,anchors,usage,quality_bias,mix_model,planner_mode,
-                protected_slots=protected_slots
+                protected_slots=protected_slots, max_output_colors=max_output_colors
             )
         real_count=len(anchors)
         newn=len(newc)
+        if max_output_colors != "auto" and newn < max_output_colors:
+            warnings.append(
+                f"Output uses {newn}/{max_output_colors} allowed slots. "
+                "The planner only creates distinct, beneficial, printable mixed recipes; "
+                "the chosen number is a maximum, not a forced count."
+            )
         if protected_slots:
             for original_color,physical_key in solid_color_overrides.items():
                 original_slot=imported["protectedSlotMap"][original_color]
@@ -3794,6 +3847,32 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
         output_codes, output_usage, preserved, color_validation=validate_output_archive(
             staged_outfile,newn,real_count,layouts,source_off_diagonal_zeros,preservation,expected_counts
         )
+        if generic_input and native_template_path:
+            progress(0.80, "Combining painted mesh with native slicer project template")
+            native_staged=outfile.with_suffix(".native.tmp.3mf")
+            try:
+                native_details=graft_native_project(
+                    staged_outfile, native_template_path, native_staged, real_count=real_count
+                )
+                # Validate the merged native project's actual array layouts.
+                # A blank slicer profile may use two purge-matrix blocks while
+                # the generic intermediate project uses one; never re-use the
+                # intermediate's layouts to validate the native project.
+                with zipfile.ZipFile(native_staged) as native_archive:
+                    native_settings=json.loads(native_archive.read('Metadata/project_settings.config'))
+                native_layouts=filament_array_layouts(native_settings,newn)
+                validate_output_archive(
+                    native_staged,newn,real_count,native_layouts,source_off_diagonal_zeros,
+                    preservation=None,expected_paint_counts=expected_counts
+                )
+                native_staged.replace(staged_outfile)
+            finally:
+                native_staged.unlink(missing_ok=True)
+            warnings.append(
+                f"Native {native_details['slicer']} project built for "
+                f"{native_details['printerPreset']} ({native_details['nozzle']} mm nozzle). "
+                "Verify printer, physical material profiles, mixtures, and plate placement in the slicer before printing."
+            )
         if outfile.exists(): outfile.unlink()
         staged_outfile.replace(outfile)
 
@@ -4137,3 +4216,7 @@ def main():
 
 if __name__=="__main__":
     raise SystemExit(main())
+
+# Native output-colors/thumbnail patch v1
+
+# Palette and Orca H2C warning patch v2

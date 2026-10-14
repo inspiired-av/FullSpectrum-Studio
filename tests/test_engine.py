@@ -121,6 +121,52 @@ def write_textured_glb(folder):
     return glb
 
 
+def write_blank_native_template(path):
+    """Minimal slicer-shaped test fixture; no personal printer profiles needed."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    production = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    relationships = "http://schemas.openxmlformats.org/package/2006/relationships"
+    model = (
+        f'<model xmlns="{core}" xmlns:p="{production}" requiredextensions="p">'
+        '<metadata name="Application">BambuStudio-02.08.04.57</metadata>'
+        '<resources/><build/></model>'
+    )
+    colors = ["#FFFFFF", "#000000", "#D02040"]
+    profile = {
+        "printer_model": "Bambu Lab H2C",
+        "printer_settings_id": "Bambu Lab H2C 0.4 nozzle",
+        "printer_variant": "0.4",
+        "print_settings_id": "0.20mm Standard",
+        "printable_area": ["0x0", "330x0", "330x320", "0x320"],
+        "printable_height": "325",
+        "filament_colour": colors,
+        "filament_multi_colour": colors[:],
+        "filament_settings_id": ["Generic PLA"] * len(colors),
+        "filament_ids": ["GFA00"] * len(colors),
+        "filament_is_mixed": ["0"] * len(colors),
+        "filament_mixed_components": [""] * len(colors),
+        "filament_mixed_sublayer_ratios": [""] * len(colors),
+        "filament_type": ["PLA"] * len(colors),
+        "filament_vendor": ["Generic"] * len(colors),
+        "filament_diameter": ["1.75"] * len(colors),
+        "flush_volumes_matrix": [
+            "0" if row == col else "120"
+            for row in range(len(colors)) for col in range(len(colors))
+        ],
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("3D/3dmodel.model", model)
+        archive.writestr("Metadata/project_settings.config", json.dumps(profile))
+        archive.writestr("Metadata/model_settings.config", "<config><plate/><assemble/></config>")
+        archive.writestr("Metadata/slice_info.config", "<config><header/></config>")
+        archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        archive.writestr("_rels/.rels", (
+            f'<Relationships xmlns="{relationships}">'
+            '<Relationship Target="/3D/3dmodel.model"/></Relationships>'
+        ))
+    return path
+
+
 class PaintCodecTests(unittest.TestCase):
     def test_known_bambu_leaf_states_are_slots_not_first_use_values(self):
         expected = {"8": 2, "0C": 3, "1C": 4, "DC": 16, "1FC": 19, "4FC": 22}
@@ -994,7 +1040,11 @@ class ConversionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder_name:
             folder=Path(folder_name)
             source=write_textured_obj(folder)
-            output=ENGINE.convert(source,"official","catalog",folder,False,"2",internal_colors=40)
+            template=write_blank_native_template(folder/"blank-native.3mf")
+            output=ENGINE.convert(
+                source,"official","catalog",folder,False,"2",
+                internal_colors=40,native_template_path=template
+            )
             self.assertEqual(output["import"]["sourceType"],"Textured OBJ")
             self.assertTrue(output["preservation"]["paintRemapVerified"])
             with zipfile.ZipFile(output["output"]) as archive:
@@ -1007,11 +1057,22 @@ class ConversionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder_name:
             folder=Path(folder_name)
             source=write_textured_glb(folder)
-            output=ENGINE.convert(source,"official","catalog",folder,False,"2")
+            template=write_blank_native_template(folder/"blank-native.3mf")
+            output=ENGINE.convert(
+                source,"official","catalog",folder,False,"2",
+                native_template_path=template
+            )
             self.assertEqual(output["import"]["sourceType"],"Textured GLB")
             self.assertTrue(output["preservation"]["paintRemapVerified"])
             preview=ENGINE.inspect_project(source,preview_mesh_dest=folder/"glb-preview.obj")
             self.assertEqual(preview["filename"],"sample.glb")
+
+    def test_textured_obj_export_requires_native_template(self):
+        with tempfile.TemporaryDirectory() as folder_name:
+            folder=Path(folder_name)
+            source=write_textured_obj(folder)
+            with self.assertRaisesRegex(RuntimeError, "requires a blank native project template"):
+                ENGINE.convert(source,"official","catalog",folder,False,"2")
 
     def test_texture_without_geometry_is_rejected_as_direct_input(self):
         with tempfile.TemporaryDirectory() as folder_name:
