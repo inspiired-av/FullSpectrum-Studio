@@ -78,7 +78,7 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Validate Windows desktop shell
         run: |
-          python -m py_compile desktop/app_support.py desktop/full_spectrum_studio.py fullspectrum_engine.py bambu_mixer_model.py standard_3mf_import.py
+          python -m py_compile desktop/app_support.py desktop/full_spectrum_studio.py fullspectrum_engine.py bambu_mixer_model.py standard_3mf_import.py solid_color_overrides.py
           python -c "import desktop.full_spectrum_studio as app; assert app.APP_VERSION"
       - name: Build portable application
         run: >
@@ -104,6 +104,7 @@ jobs:
           --hidden-import functools
           --add-data "fullspectrum_engine.py;."
           --add-data "standard_3mf_import.py;."
+          --add-data "solid_color_overrides.py;."
           --add-data "bambu_mixer_model.py;."
           --add-data "LICENSE;."
           --add-data "THIRD_PARTY_NOTICES.md;."

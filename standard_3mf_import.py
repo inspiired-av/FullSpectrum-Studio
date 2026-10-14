@@ -165,10 +165,44 @@ def _read_colored_meshes(archive, max_faces):
     return positions, faces, colors, blended_corners
 
 
+def source_color_counts(source, max_faces=DEFAULT_MAX_FACES):
+    """List actual face colors before source-slot quantization, for the override UI."""
+    with ZipFile(source) as archive:
+        _, _, colors, _ = _read_colored_meshes(archive, max_faces)
+    return dict(Counter(colors).most_common())
+
+
+def protected_import_palette(colors, protected_colors, kmeans_colors, color_distance, max_paint_slots):
+    """Keep protected colors in dedicated slots; never cluster unprotected faces into them."""
+    distinct = set(colors)
+    selected = []
+    for color in protected_colors:
+        normalized = str(color).upper()
+        if normalized in selected:
+            continue
+        if normalized not in distinct:
+            raise UnsupportedColored3MF(f"Protected source color {normalized} is not present in the 3MF")
+        selected.append(normalized)
+    unprotected = [color for color in colors if color not in set(selected)]
+    if len(selected) + int(bool(unprotected)) > max_paint_slots:
+        raise UnsupportedColored3MF("Too many solid-color overrides for the available 3MF paint slots")
+    remaining = max_paint_slots - len(selected)
+    other_palette, other_assignment = (kmeans_colors(unprotected, min(remaining, len(set(unprotected))))
+                                       if unprotected else ([], {}))
+    palette = selected + other_palette
+    assignments = {color: index + 1 for index, color in enumerate(selected)}
+    assignments.update({color: slot + len(selected) for color, slot in other_assignment.items()})
+    if len(palette) == 1:
+        # Existing Bambu importer requires at least two input slots.
+        alternative = "#000000" if color_distance(palette[0], "#000000") > color_distance(palette[0], "#FFFFFF") else "#FFFFFF"
+        palette.append(alternative)
+    return palette, assignments, {color: index + 1 for index, color in enumerate(selected)}
+
+
 def import_colored_3mf_project(source, destination, *, kmeans_colors,
                                paint_code_for_slot, basic_project_settings,
                                color_distance, max_paint_slots=32,
-                               max_faces=DEFAULT_MAX_FACES, progress=None):
+                               max_faces=DEFAULT_MAX_FACES, progress=None, protected_source_colors=()):
     """Convert material-colored 3MF into an intermediate Bambu paint-state 3MF.
 
     The converted project is the input to the unchanged FullSpectrum planner.
@@ -181,12 +215,11 @@ def import_colored_3mf_project(source, destination, *, kmeans_colors,
     with ZipFile(source) as archive:
         positions, faces, raw_colors, blended = _read_colored_meshes(archive, max_faces)
     counts = Counter(raw_colors)
-    palette, assignments = kmeans_colors(raw_colors, min(max_paint_slots, len(counts)))
+    palette, assignments, protected_slots = protected_import_palette(
+        raw_colors, protected_source_colors, kmeans_colors, color_distance, max_paint_slots
+    )
     if not palette:
         raise UnsupportedColored3MF("Could not build a source color palette")
-    if len(palette) == 1:
-        other = "#000000" if color_distance(palette[0], "#000000") > color_distance(palette[0], "#FFFFFF") else "#FFFFFF"
-        palette.append(other)
     if progress:
         progress(0.10, f"Imported {len(faces):,} triangles, {len(counts)} RGB colors, {len(palette)} paint slots")
 
@@ -224,4 +257,5 @@ def import_colored_3mf_project(source, destination, *, kmeans_colors,
         "exportColorCount": len(palette),
         "compressedForBambu": len(counts) > len(palette),
         "perVertexColorFacesApproximated": blended,
+        "protectedSlotMap": protected_slots,
     }

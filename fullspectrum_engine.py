@@ -34,7 +34,9 @@ from functools import lru_cache
 sys.dont_write_bytecode = True
 
 from bambu_mixer_model import blend_color_multi as bambu_blend_color_multi
-from standard_3mf_import import import_colored_3mf_project
+from standard_3mf_import import import_colored_3mf_project, source_color_counts
+from solid_color_overrides import (normalize_solid_overrides, require_protected_slots,
+                                   solid_anchor_choice)
 
 BAMBU_PLA = [
     ("PLA Matte Ivory White", "#FFFFFF"),
@@ -1486,7 +1488,7 @@ def project_mesh_metrics(archive):
         "previewBuildEstimateSeconds":preview_seconds,
     }
 
-def stage_standard_colored_3mf(source, destination, progress=None):
+def stage_standard_colored_3mf(source, destination, progress=None, protected_source_colors=()):
     """Translate standard 3MF color groups into Bambu-compatible facet paint."""
     return import_colored_3mf_project(
         source, destination,
@@ -1497,7 +1499,19 @@ def stage_standard_colored_3mf(source, destination, progress=None):
         max_paint_slots=MAX_BAMBU_PAINT_SLOT,
         max_faces=MAX_IMPORT_FACES,
         progress=progress,
+        protected_source_colors=protected_source_colors,
     )
+
+
+def available_solid_source_colors(path):
+    """Read exact (pre-quantization) standard 3MF source colors for the UI."""
+    with zipfile.ZipFile(path) as archive:
+        validated_archive_infos(archive)
+    return source_color_counts(path, MAX_IMPORT_FACES)
+
+
+def normalize_protected_color_keys(value):
+    return normalize_solid_overrides(value)
 
 
 def is_standard_colored_3mf(path):
@@ -1724,6 +1738,37 @@ def write_preview_materials(path, colors, material_prefix):
             red,green,blue=(channel/255.0 for channel in rgb(color))
             output.write(f"newmtl {material_prefix}_{slot}\nKd {red:.4f} {green:.4f} {blue:.4f}\nKa {red*.16:.4f} {green*.16:.4f} {blue*.16:.4f}\nNs 22\n\n")
 
+def exact_small_preview_geometry(archive, slot_count, model_names):
+    """Keep small-model vertices and triangles without welding nearby surfaces."""
+    vertices=[]
+    faces={}
+    for name in model_names:
+        offset=len(vertices)
+        with archive.open(name) as source:
+            for raw_line in source:
+                if b"<vertex " in raw_line:
+                    for match in VERTEX_COORDINATES_BYTES_PATTERN.finditer(raw_line):
+                        try:
+                            vertices.append(tuple(float(v) for v in match.groups()))
+                        except ValueError:
+                            continue
+                if b"<triangle " not in raw_line:
+                    continue
+                for match in TRIANGLE_INDICES_BYTES_PATTERN.finditer(raw_line):
+                    try:
+                        ids=tuple(offset+int(v) for v in match.groups())
+                    except ValueError:
+                        continue
+                    if any(i<offset or i>=len(vertices) for i in ids):
+                        continue
+                    if len(set(ids))<3:
+                        continue
+                    paint=PAINT_CODE_BYTES_PATTERN.search(match.group(0))
+                    code=paint.group(1).decode("ascii",errors="replace") if paint else None
+                    faces[len(faces)] = (tuple(i+1 for i in ids), preview_face_slot(code,slot_count))
+    return vertices,faces
+
+
 def reduced_preview_geometry(archive, slot_count, grid_resolution=PREVIEW_GRID_RESOLUTION):
     """Build one bounded display mesh and retain its visible source-slot usage."""
     model_names=sorted(
@@ -1732,6 +1777,12 @@ def reduced_preview_geometry(archive, slot_count, grid_resolution=PREVIEW_GRID_R
     )
     if not model_names:
         return [],{}
+    # Already small models should not have thin surfaces and letter details
+    # joined together by display-grid welding.
+    if sum(archive.getinfo(name).file_size for name in model_names) <= 8*1024*1024:
+        small_vertices,small_faces=exact_small_preview_geometry(archive,slot_count,model_names)
+        if small_vertices and small_faces:
+            return small_vertices,small_faces
 
     source_vertices=array("f")
     offsets={}
@@ -2493,7 +2544,7 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
     return min(trials,key=lambda trial:trial[0])[2]
 
 def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_BIAS,
-                  mix_model="bambu", planner_mode="best"):
+                  mix_model="bambu", planner_mode="best", protected_slots=None):
     planner_mode=normalize_planner_mode(planner_mode)
     real_count=len(anchors)
     newc=[anchor_color(anchor) for anchor in anchors]
@@ -2511,7 +2562,17 @@ def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_
     if high_fidelity:
         max_unique_mixes=max(max_unique_mixes,min(MAX_BAMBU_PAINT_SLOT-real_count,8+round(quality_bias/4)))
     mix_candidates=[]
+    protected_slots=protected_slots or {}
     for old_slot,target in enumerate(old_colors, start=1):
+        if old_slot in protected_slots:
+            forced_slot, row=solid_anchor_choice(
+                target, protected_slots[old_slot], anchors,
+                anchor_matches_key, anchor_color, anchor_name, dist,
+            )
+            row[0]=old_slot
+            old_slot_to_new_slot[old_slot]=forced_slot
+            rows_by_slot[old_slot]=row
+            continue
         direct_err,direct_slot,direct_name,direct_hex=nearest_anchor_error(target,anchors)
         cs,rs,preview,mix_err=best_mix_recipe(
             target,
@@ -2899,7 +2960,7 @@ def append_unique_quality(queue, seen, values, allowed=None):
 def select_smart_palette(old_colors, usage, mode, inventory, palette_source, real_slots="auto",
                          custom_catalog_path=None, reference=None, mix_model="bambu", planner_mode="best",
                          progress=None, material_families=None, pinned_anchor_keys=None,
-                         allowed_anchor_keys=None):
+                         allowed_anchor_keys=None, protected_slots=None):
     planner_mode=normalize_planner_mode(planner_mode)
     candidates=list(SMART_QUALITY_CANDIDATES)
     if mode=="cmykw":
@@ -2931,7 +2992,8 @@ def select_smart_palette(old_colors, usage, mode, inventory, palette_source, rea
                 custom_catalog_path,reference,mix_model,quality_bias,planner_mode,
                 material_families,pinned_anchor_keys,allowed_anchor_keys
             )
-            palette=build_palette(old_colors,anchors,usage,quality_bias,mix_model,planner_mode)
+            palette=build_palette(old_colors,anchors,usage,quality_bias,mix_model,planner_mode,
+                                  protected_slots=protected_slots)
             rows=palette[-1]
             metrics=quality_metrics(rows,usage,old_colors,reference,mix_model)
             mixed_slots,mixed_share,_=palette_usage_stats(rows,usage,quality_bias)
@@ -3419,13 +3481,20 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             internal_colors=48, catalog_region="global", planner_mode="best",
             planning_sample="paint", plan_only=False, material_families=None,
             pinned_anchor_keys=None, allowed_anchor_keys=None, preview_cache=None,
-            progress=lambda fraction,message: None):
+            progress=lambda fraction,message: None, solid_color_overrides=None):
     infile=Path(infile).expanduser().resolve()
     planner_mode=normalize_planner_mode(planner_mode)
     planning_sample=normalize_planning_sample(planning_sample)
     material_families=normalize_material_families(material_families)
     pinned_anchor_keys=normalize_anchor_keys(pinned_anchor_keys)
     allowed_anchor_keys=normalize_anchor_keys(allowed_anchor_keys)
+    solid_color_overrides=normalize_solid_overrides(solid_color_overrides)
+    if solid_color_overrides:
+        if infile.suffix.lower() != ".3mf" or not is_standard_colored_3mf(infile):
+            raise ValueError("Protected solid source colors currently require a standard colored 3MF")
+        if mode != "official":
+            raise ValueError("Solid filament overrides require the Bambu PLA (official) strategy")
+        pinned_anchor_keys=list(dict.fromkeys(pinned_anchor_keys+list(solid_color_overrides.values())))
     quality_bias_mode="auto" if is_auto_quality_bias(quality_bias) else "manual"
     quality_bias=DEFAULT_QUALITY_BIAS if quality_bias_mode=="auto" else clamp_quality_bias(quality_bias)
     catalog_region=str(catalog_region or "global").strip().lower()
@@ -3452,7 +3521,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
         if infile.suffix.lower()==".3mf" and is_standard_colored_3mf(infile):
             progress(0.06,"Importing standard 3MF material colors")
             project_file=import_tmp/f"{infile.stem}_colored_source.3mf"
-            imported=stage_standard_colored_3mf(infile,project_file,progress)
+            imported=stage_standard_colored_3mf(infile,project_file,progress,solid_color_overrides)
             if imported["compressedForBambu"]:
                 warnings.append(
                     f"Source contains {imported['internalColorCount']} RGB colors; "
@@ -3539,6 +3608,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             progress(0.19,"Collecting existing Bambu paint states")
             ordered_codes,code_counts=collect_paint_codes(tmp)
             object_extruders=model_setting_extruder_slots(tmp,oldn)
+        protected_slots=require_protected_slots(imported,solid_color_overrides)
         reference_result=analyze_reference(reference,reference_tmp) if reference else None
         paint_usage=paint_slot_usage(code_counts, oldn)
         paint_usage=include_model_extruder_usage(paint_usage,object_extruders)
@@ -3591,7 +3661,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             plan=select_smart_palette(
                 old,usage,mode,inventory,palette_source,real_slots,
                 custom_catalog_path,reference_result,mix_model,planner_mode,progress,
-                material_families,pinned_anchor_keys,allowed_anchor_keys
+                material_families,pinned_anchor_keys,allowed_anchor_keys,protected_slots
             )
             quality_bias=plan["qualityBias"]
             anchors=plan["anchors"]
@@ -3610,10 +3680,21 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                                    material_families,pinned_anchor_keys,allowed_anchor_keys)
             progress(0.34,"Building mixes with useful predicted visual gain")
             newc,ism,comps,ratios,old_slot_to_new_slot,rows=build_palette(
-                old,anchors,usage,quality_bias,mix_model,planner_mode
+                old,anchors,usage,quality_bias,mix_model,planner_mode,
+                protected_slots=protected_slots
             )
         real_count=len(anchors)
         newn=len(newc)
+        if protected_slots:
+            for original_color,physical_key in solid_color_overrides.items():
+                original_slot=imported["protectedSlotMap"][original_color]
+                row=next((item for item in rows if item[0]==original_slot),None)
+                if row is None or row[3]!="SOLID" or row[1]>real_count:
+                    raise RuntimeError(f"Protected source color {original_color} did not map to a physical filament")
+            warnings.append(
+                f"{len(protected_slots)} exact imported source color(s) forced to solid physical "
+                "filament slots; no mixed recipes were assigned to those paint states."
+            )
         if real_count > DEFAULT_AUTO_MAX_REAL_SLOTS:
             warnings.append(
                 f"Experimental {real_count}-physical-slot plan: this can improve color fidelity, "
