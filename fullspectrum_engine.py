@@ -35,6 +35,11 @@ sys.dont_write_bytecode = True
 
 from bambu_mixer_model import blend_color_multi as bambu_blend_color_multi
 from standard_3mf_import import import_colored_3mf_project, source_color_counts
+from direct_source_palette import (load_exact_color_targets, mapped_source_paint_colors,
+                                   rewrite_staged_faces, fallback_representatives,
+                                   write_predicted_obj, globally_reassign_colors)
+from global_recipe_optimizer import optimize_direct_palette
+from palette_budget_optimizer import allocate_palette, normalize_output_color_strategy
 from native_project_template import inspect_template, graft_native_project
 from solid_color_overrides import (normalize_solid_overrides, require_protected_slots,
                                    solid_anchor_choice)
@@ -3513,7 +3518,8 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             planning_sample="paint", plan_only=False, material_families=None,
             pinned_anchor_keys=None, allowed_anchor_keys=None, preview_cache=None,
             progress=lambda fraction,message: None, solid_color_overrides=None,
-            native_template_path=None, max_output_colors="auto"):
+            native_template_path=None, max_output_colors="auto", direct_source_colors=False,
+            output_color_strategy="maximum_fidelity"):
     infile=Path(infile).expanduser().resolve()
     generic_input=(infile.suffix.lower() in (".obj", ".glb") or
                    (infile.suffix.lower()==".3mf" and is_standard_colored_3mf(infile)))
@@ -3527,6 +3533,9 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             "Native Project Template is intended for standard colored 3MF/OBJ/GLB imports. "
             "This input is already a native slicer project; clear the template to preserve its profile."
         )
+    if direct_source_colors and not (infile.suffix.lower()==".3mf" and generic_input):
+        raise RuntimeError("Direct source-color optimization currently supports material-colored 3MF input only")
+    output_color_strategy=normalize_output_color_strategy(output_color_strategy)
     template_details=inspect_template(native_template_path) if native_template_path else None
     planner_mode=normalize_planner_mode(planner_mode)
     planning_sample=normalize_planning_sample(planning_sample)
@@ -3568,7 +3577,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             progress(0.06,"Importing standard 3MF material colors")
             project_file=import_tmp/f"{infile.stem}_colored_source.3mf"
             imported=stage_standard_colored_3mf(infile,project_file,progress,solid_color_overrides)
-            if imported["compressedForBambu"]:
+            if imported["compressedForBambu"] and not direct_source_colors:
                 warnings.append(
                     f"Source contains {imported['internalColorCount']} RGB colors; "
                     f"the intermediate project uses {imported['exportColorCount']} paint colors "
@@ -3654,14 +3663,46 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             progress(0.19,"Collecting existing Bambu paint states")
             ordered_codes,code_counts=collect_paint_codes(tmp)
             object_extruders=model_setting_extruder_slots(tmp,oldn)
-        protected_slots=require_protected_slots(imported,solid_color_overrides)
+        # The intermediate project supplies geometry and baseline material
+        # properties. Phase 3 plans the *original* face colors, bypassing the
+        # intermediate 32-color source quantization entirely.
+        staged_colors=list(old)
+        staged_slot_count=oldn
+        direct_source=None
+        if direct_source_colors:
+            direct_source=load_exact_color_targets(infile,MAX_IMPORT_FACES)
+            old=direct_source["colors"]
+            oldn=len(old)
+            protected_slots={}
+            for source_hex, filament_key in solid_color_overrides.items():
+                if source_hex not in direct_source["source_slots"]:
+                    raise RuntimeError(f"Protected source color {source_hex} was not found in the original model")
+                protected_slots[direct_source["source_slots"][source_hex]]=filament_key
+            paint_usage=Counter(direct_source["usage"])
+            warnings.append(
+                f"Direct source planning: {oldn} original RGB colors mapped straight to "
+                "final Bambu paint slots; the intermediate quantization does not affect colors."
+            )
+            if direct_source["approximate_vertex_blends"]:
+                warnings.append(
+                    f"{direct_source['approximate_vertex_blends']} face(s) have different corner "
+                    "colors and are approximated by their average as before."
+                )
+        else:
+            protected_slots=require_protected_slots(imported,solid_color_overrides)
+            paint_usage=paint_slot_usage(code_counts,oldn)
+            paint_usage=include_model_extruder_usage(paint_usage,object_extruders)
         reference_result=analyze_reference(reference,reference_tmp) if reference else None
-        paint_usage=paint_slot_usage(code_counts, oldn)
-        paint_usage=include_model_extruder_usage(paint_usage,object_extruders)
         usage=paint_usage
+        if direct_source is not None and planning_sample=="preview":
+            # Stage preview slot IDs do not correspond to unquantized source IDs.
+            # Surface-area/visibility weights can be added in a later milestone.
+            planning_sample="paint"
+            warnings.append("Direct-color planning currently weights original faces, "
+                            "not the quantized preview mesh.")
         planning_preview_mesh=None
         preview_cache_result=None
-        if planning_sample=="preview" or analysis_dir:
+        if direct_source is None and (planning_sample=="preview" or analysis_dir):
             cache_path=(Path(preview_cache).expanduser() if preview_cache else
                         default_preview_cache_path(project_file,oldn))
             preview_cache_result=ensure_preview_cache(
@@ -3686,9 +3727,9 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                     "falling back to original paint-state usage."
                 )
                 planning_sample="paint"
-        layouts=filament_array_layouts(obj,oldn)
+        layouts=filament_array_layouts(obj,staged_slot_count)
         source_off_diagonal_zeros={
-            key:off_diagonal_zero_count(obj[key],oldn,width)
+            key:off_diagonal_zero_count(obj[key],staged_slot_count,width)
             for key,(kind,width) in layouts.items() if kind=="matrix"
         }
 
@@ -3730,6 +3771,74 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                 old,anchors,usage,quality_bias,mix_model,planner_mode,
                 protected_slots=protected_slots, max_output_colors=max_output_colors
             )
+        if direct_source is not None:
+            # Phase 3 v1 retained nearest PHYSICAL fallbacks for any original
+            # color whose preferred mixed recipe was excluded by the slot cap.
+            # Globally reuse selected mixes before any quality/export checks.
+            refined,global_assignment=globally_reassign_colors(
+                old,(newc,ism,comps,ratios,old_slot_to_new_slot,rows),
+                anchors,protected_slots,dist,anchor_name,anchor_color
+            )
+            newc,ism,comps,ratios,old_slot_to_new_slot,rows=refined
+            warnings.append(
+                f"Phase 3 global reassignment: {global_assignment['reassigned']} "
+                f"source color(s) remapped to closer existing output slots; "
+                f"worst unprotected dE {global_assignment['worstBefore']:.2f} -> "
+                f"{global_assignment['worstAfter']:.2f}."
+            )
+        if direct_source is not None:
+            # Global palette policies operate on the original, unquantized
+            # 3MF color targets. A larger output budget is NOT a promise of
+            # better fidelity; policy controls if/when further slots are used.
+            requested=normalize_max_output_colors(max_output_colors)
+            budget=MAX_BAMBU_PAINT_SLOT if requested=="auto" else requested
+            def candidate_grid():
+                if output_color_strategy=="balanced":
+                    return
+                best_mode=planner_mode=="best"
+                yield from mix_recipe_index(
+                    anchors,mix_model,
+                    "fine2" if best_mode else "standard2",
+                    "fine3" if best_mode and quality_bias>=70 else
+                    "standard3" if quality_bias>=70 else "none"
+                )
+                if best_mode:
+                    # Finer printable two- and three-filament ratios. Bambu's
+                    # loaded swatch uses integer-percent ratio rounding.
+                    anchor_hex=[anchor_color(anchor) for anchor in anchors]
+                    for a,b in combinations(range(1,len(anchors)+1),2):
+                        for percent in range(1,100,2):
+                            mix_ratio=(percent/100,1-percent/100)
+                            yield (a,b),mix_ratio,mix(
+                                (anchor_hex[a-1],anchor_hex[b-1]),mix_ratio,mix_model
+                            )
+                    if quality_bias>=70:
+                        for a,b,c in combinations(range(1,len(anchors)+1),3):
+                            for x in range(1,19):
+                                for y in range(1,20-x):
+                                    z=20-x-y
+                                    mix_ratio=(x/20,y/20,z/20)
+                                    yield (a,b,c),mix_ratio,mix(
+                                        (anchor_hex[a-1],anchor_hex[b-1],anchor_hex[c-1]),
+                                        mix_ratio,mix_model
+                                    )
+            original_palette=(newc,ism,comps,ratios,old_slot_to_new_slot,rows)
+            optimized,optimizer_stats=allocate_palette(
+                old,usage,original_palette,anchors,protected_slots,
+                dist,anchor_name,candidate_grid(),budget,output_color_strategy
+            )
+            if optimizer_stats["accepted"]:
+                newc,ism,comps,ratios,old_slot_to_new_slot,rows=optimized
+            state=("APPLIED" if optimizer_stats["accepted"] else "NOT APPLIED")
+            warnings.append(
+                f"Phase 3 global recipe selection: {output_color_strategy} {state}; "
+                f"{optimizer_stats['reason']}; "
+                f"weighted mean dE {optimizer_stats['meanBefore']:.3f} -> "
+                f"{optimizer_stats['meanAfter']:.3f}, worst dE "
+                f"{optimizer_stats['worstBefore']:.2f} -> "
+                f"{optimizer_stats['worstAfter']:.2f}; "
+                f"{len(newc)}/{budget} total slots."
+            )
         real_count=len(anchors)
         newn=len(newc)
         if max_output_colors != "auto" and newn < max_output_colors:
@@ -3740,7 +3849,8 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             )
         if protected_slots:
             for original_color,physical_key in solid_color_overrides.items():
-                original_slot=imported["protectedSlotMap"][original_color]
+                original_slot=(direct_source["source_slots"][original_color] if direct_source is not None
+                               else imported["protectedSlotMap"][original_color])
                 row=next((item for item in rows if item[0]==original_slot),None)
                 if row is None or row[3]!="SOLID" or row[1]>real_count:
                     raise RuntimeError(f"Protected source color {original_color} did not map to a physical filament")
@@ -3807,26 +3917,46 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                                 ". Use Exact CMYKW or load closer colors for true roles.")
         real_profiles,mixed_profile=project_compatible_profiles(obj,anchors)
         if plan_only:
-            analysis_assets=build_plan_analysis_assets(
-                project_file,old,rows,real_count,analysis_dir,warnings,progress,planning_preview_mesh
-            )
+            if direct_source is not None and analysis_dir:
+                predicted=write_predicted_obj(
+                    direct_source,old_slot_to_new_slot,newc,
+                    Path(analysis_dir)/"direct-source-predicted.obj"
+                )
+                analysis_assets={"predictedMesh":str(predicted)}
+            elif direct_source is not None:
+                analysis_assets=None
+            else:
+                analysis_assets=build_plan_analysis_assets(
+                    project_file,old,rows,real_count,analysis_dir,warnings,progress,planning_preview_mesh
+                )
             progress(1.0,"Plan preview ready. No 3MF was written.")
-            return plan_preview_payload(
+            result=plan_preview_payload(
                 infile,mode,palette_source,planner_mode,planning_sample,
                 catalog_region,region_label,catalog_source_label,oldn,real_count,newc,rows,
                 anchors,real_profiles,quality_bias,quality_bias_mode,quality,printability,
                 recommendation,reference_result,imported,warnings,material_families,
                 pinned_anchor_keys,allowed_anchor_keys,analysis_assets,worst_match
             )
+            result["directSourceColors"]=direct_source is not None
+            return result
 
-        representatives=source_slot_representatives(old,anchors,old_slot_to_new_slot,rows,newn)
-        progress(0.42,"Remapping painted facets with the Bambu paint-state codec")
-        expected_counts=expected_remapped_paint_counts(code_counts,old_slot_to_new_slot,oldn,newn)
-        patched=remap_paint_codes_by_codec(tmp, old_slot_to_new_slot, oldn, newn)
-        remapped_extruders=remap_model_setting_extruders(tmp,old_slot_to_new_slot)
+        if direct_source is not None:
+            representatives=fallback_representatives(staged_colors,newc,dist)
+            progress(0.42,"Painting original source colors directly on the final 3MF facets")
+            encoded_faces=mapped_source_paint_colors(
+                direct_source,old_slot_to_new_slot,paint_code_for_slot,newn
+            )
+            patched,expected_counts=rewrite_staged_faces(tmp,encoded_faces)
+            remapped_extruders=0  # Generic imported mesh has no slicer object extruders.
+        else:
+            representatives=source_slot_representatives(old,anchors,old_slot_to_new_slot,rows,newn)
+            progress(0.42,"Remapping painted facets with the Bambu paint-state codec")
+            expected_counts=expected_remapped_paint_counts(code_counts,old_slot_to_new_slot,oldn,newn)
+            patched=remap_paint_codes_by_codec(tmp,old_slot_to_new_slot,oldn,newn)
+            remapped_extruders=remap_model_setting_extruders(tmp,old_slot_to_new_slot)
 
         progress(0.58,"Preserving source purge transitions and filament properties")
-        resize_project_filament_arrays(obj,oldn,representatives,layouts,old,newc)
+        resize_project_filament_arrays(obj,staged_slot_count,representatives,layouts,staged_colors,newc)
         obj["filament_colour"]=newc
         obj["filament_settings_id"]=[preset for preset,_ in real_profiles]+[mixed_profile[0]]*(newn-real_count)
         obj["filament_ids"]=[filament_id for _,filament_id in real_profiles]+[mixed_profile[1]]*(newn-real_count)

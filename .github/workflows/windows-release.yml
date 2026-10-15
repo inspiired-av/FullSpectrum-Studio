@@ -86,6 +86,9 @@ jobs:
           --name FullSpectrumStudio
           --hidden-import fullspectrum_engine
           --hidden-import native_project_template
+          --hidden-import direct_source_palette
+          --hidden-import global_recipe_optimizer
+          --hidden-import palette_budget_optimizer
           --hidden-import native_preview_thumbnail
           --hidden-import bambu_mixer_model
           --hidden-import json
@@ -106,6 +109,9 @@ jobs:
           --hidden-import functools
           --add-data "fullspectrum_engine.py;."
           --add-data "native_project_template.py;."
+          --add-data "direct_source_palette.py;."
+          --add-data "global_recipe_optimizer.py;."
+          --add-data "palette_budget_optimizer.py;."
           --add-data "native_preview_thumbnail.py;."
           --add-data "standard_3mf_import.py;."
           --add-data "solid_color_overrides.py;."
