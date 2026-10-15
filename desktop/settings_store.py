@@ -15,11 +15,12 @@ CHOICES = {
     "source": {"inventory", "catalog", "all-bambu", "custom", "exact-cmykw"},
     "catalog_region": {"global", "eu", "us-ca", "uk", "au-nz", "asia"},
     "real_slots": {"auto", "2", "3", "4", "5", "6", "7", "8"},
+    "output_color_strategy": {"balanced", "maximum_fidelity", "fill_palette"},
     "max_output_colors": {"auto"} | {str(i) for i in range(2,33)},
     "mix_model": {"bambu"},
     "output_application": {"Bambu Studio", "OrcaSlicer"},
 }
-BOOL_FIELDS = ("smart_quality", "auto_preview", "auto_open")
+BOOL_FIELDS = ("smart_quality", "auto_preview", "auto_open", "direct_source_colors")
 ANCHOR_FIELDS = ("disabled_anchor_keys", "pinned_anchor_keys")
 
 

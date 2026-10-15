@@ -36,6 +36,7 @@ from orca_profile_warning import orca_h2c_warning
 from native_project_template import inspect_template, TemplateError
 from desktop.slicer_launcher import find_windows_slicer
 from desktop.source_path_utils import same_source_path, find_original_material_source
+from phase3_ui_guard import strategy_protection_conflict, optimizer_decision_summary
 from desktop.windows_mesh_preview import MeshPreviewCanvas
 from desktop.source_color_preview import read_standard_color_mesh
 
@@ -74,7 +75,9 @@ class StudioApp(tk.Tk):
         self.source = tk.StringVar(value="inventory")
         self.catalog_region = tk.StringVar(value="global")
         self.real_slots = tk.StringVar(value="auto")
-        self.max_output_colors = tk.StringVar(value="auto")
+        self.output_color_strategy = tk.StringVar(value="maximum_fidelity")
+        self.direct_source_colors = tk.BooleanVar(value=True)
+        self.max_output_colors = tk.StringVar(value="32")
         self.mix_model = tk.StringVar(value="bambu")
         self.quality_bias = tk.IntVar(value=60)
         self.smart_quality = tk.BooleanVar(value=True)
@@ -123,11 +126,14 @@ class StudioApp(tk.Tk):
             "custom", "strategy", "planner_mode", "planning_sample", "source",
             "catalog_region", "real_slots", "max_output_colors", "mix_model", "quality_bias",
             "smart_quality", "auto_preview", "auto_open", "output_application",
+            "output_color_strategy",
             "native_project_template",
         )
         for field in fields:
             if field in settings:
                 getattr(self, field).set(settings[field])
+        if self.max_output_colors.get() == "auto":
+            self.max_output_colors.set("32")
         self.disabled_anchor_keys = set(settings.get("disabled_anchor_keys", []))
         self.pinned_anchor_keys = set(settings.get("pinned_anchor_keys", []))
         self._refresh_native_template_status()
@@ -140,6 +146,7 @@ class StudioApp(tk.Tk):
             "custom", "strategy", "planner_mode", "planning_sample", "source",
             "catalog_region", "real_slots", "max_output_colors", "mix_model", "quality_bias",
             "smart_quality", "auto_preview", "auto_open", "output_application",
+            "output_color_strategy",
             "native_project_template",
         )
         settings = {field: getattr(self, field).get() for field in fields}
@@ -228,22 +235,44 @@ class StudioApp(tk.Tk):
 
         ttk.Separator(frame).pack(fill="x", pady=18)
         ttk.Label(frame, text="PLAN", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
-        choices = ttk.Frame(frame)
-        choices.pack(fill="x")
-        self.combo(choices, "Strategy", self.strategy, ["official", "cmykw"], 0, 0)
-        self.combo(choices, "Planner", self.planner_mode, ["best", "fast"], 1, 0)
-        self.combo(choices, "Filaments", self.source, ["inventory", "catalog", "all-bambu", "custom", "exact-cmykw"], 2, 0)
-        self.combo(choices, "Physical slots", self.real_slots, ["auto", "2", "3", "4", "5", "6", "7", "8"], 0, 1)
-        self.combo(choices, "Catalog region", self.catalog_region, ["global", "eu", "us-ca", "uk", "au-nz", "asia"], 1, 1)
-        self.combo(choices, "Planning sample", self.planning_sample, ["paint", "preview"], 2, 1)
-        limit_row=ttk.Frame(frame)
-        limit_row.pack(fill="x", pady=(0, 7))
-        ttk.Label(limit_row, text="Max output colors", style="Small.TLabel").pack(side="left")
-        ttk.Combobox(limit_row, textvariable=self.max_output_colors,
-                     values=["auto"]+[str(i) for i in range(2,33)],
-                     state="readonly", width=8).pack(side="left", padx=(9, 8))
-        ttk.Label(limit_row, text="total physical + mixed; up to 32",
-                  style="Small.TLabel").pack(side="left")
+        # Phase 3 UI cleanup v4.2: intent-first controls; advanced engine
+        # options remain available but are not required for normal use.
+        ttk.Label(frame, text="Filament source", style="Small.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Combobox(
+            frame, textvariable=self.source,
+            values=["inventory", "catalog", "all-bambu", "custom", "exact-cmykw"],
+            state="readonly", width=24,
+        ).pack(fill="x", pady=(0, 9))
+
+        ttk.Label(frame, text="COLOR OPTIMIZATION", style="Section.TLabel").pack(anchor="w", pady=(1, 7))
+        strategy_box = ttk.Frame(frame)
+        strategy_box.pack(fill="x", pady=(0, 8))
+        for title, detail, value in (
+            ("Balanced", "Fewer mixtures while keeping useful color detail", "balanced"),
+            ("Maximum fidelity (Recommended)", "Add colors when they improve matching", "maximum_fidelity"),
+            ("Fill palette", "Aim to fill the available slots with distinct recipes", "fill_palette"),
+        ):
+            ttk.Radiobutton(strategy_box, text=title,
+                            variable=self.output_color_strategy,
+                            value=value).pack(anchor="w", padx=(5, 0), pady=(3, 0))
+            ttk.Label(strategy_box, text=detail, style="Small.TLabel",
+                      wraplength=375).pack(anchor="w", padx=(28, 0))
+
+        size_row = ttk.Frame(frame)
+        size_row.pack(fill="x", pady=(4, 2))
+        self.palette_size_title = tk.StringVar(value="Maximum palette size")
+        ttk.Label(size_row, textvariable=self.palette_size_title).pack(side="left")
+        ttk.Combobox(size_row, textvariable=self.max_output_colors,
+                     values=[str(i) for i in range(2,33)],
+                     state="readonly", width=7).pack(side="right")
+        self.palette_size_help = tk.StringVar(value="Physical + mixed filament slots (32 max)")
+        ttk.Label(frame, textvariable=self.palette_size_help,
+                  style="Small.TLabel", wraplength=390).pack(anchor="w", pady=(0, 4))
+        ttk.Label(frame,
+                  text="Original 3MF material colors are preserved automatically when supported.",
+                  style="Small.TLabel", wraplength=390).pack(anchor="w", pady=(1, 8))
+        self.output_color_strategy.trace_add("write", self._update_palette_policy_hint)
+        self._update_palette_policy_hint()
 
         filament_row = ttk.Frame(frame)
         filament_row.pack(fill="x", pady=(2, 10))
@@ -260,6 +289,34 @@ class StudioApp(tk.Tk):
         ttk.Button(solids_row, text="Protect Solid Colors", command=self.open_solid_color_selector).pack(side="left")
         ttk.Label(solids_row, textvariable=self.solid_override_summary, style="Small.TLabel").pack(side="left", padx=(10, 0))
 
+        advanced_toggle = ttk.Button(frame, text="Advanced settings  ▸",
+                                     command=self._toggle_advanced_settings)
+        advanced_toggle.pack(anchor="w", pady=(1, 5))
+        self.advanced_settings_toggle = advanced_toggle
+        advanced = ttk.Frame(frame)
+        self.advanced_settings_frame = advanced
+        choices = ttk.Frame(advanced)
+        choices.pack(fill="x")
+        self.combo(choices, "Planning effort", self.planner_mode, ["best", "fast"], 0, 0)
+        self.combo(choices, "Physical slots", self.real_slots,
+                   ["auto", "2", "3", "4", "5", "6", "7", "8"], 1, 0)
+        self.combo(choices, "Strategy", self.strategy, ["official", "cmykw"], 0, 1)
+        self.combo(choices, "Catalog region", self.catalog_region,
+                   ["global", "eu", "us-ca", "uk", "au-nz", "asia"], 1, 1)
+        self.combo(choices, "Planning sample", self.planning_sample,
+                   ["paint", "preview"], 0, 2)
+        slider = ttk.Frame(advanced)
+        slider.pack(fill="x", pady=(4, 9))
+        ttk.Checkbutton(slider, text="Smart quality", variable=self.smart_quality).pack(side="left")
+        tk.Scale(slider, from_=0, to=100, orient="horizontal",
+                 variable=self.quality_bias, bg="#151719", fg="#d9e1e3",
+                 highlightthickness=0, troughcolor="#24282b",
+                 activebackground="#55bdcf", length=180).pack(side="left", fill="x", expand=True, padx=(8, 0))
+        ttk.Label(advanced,
+                  text="Best searches more thoroughly. Advanced settings change planning effort and physical filament selection.",
+                  style="Small.TLabel", wraplength=380).pack(anchor="w", pady=(0, 8))
+        self.advanced_settings_expanded = False
+
         handoff = ttk.Frame(frame)
         handoff.pack(fill="x", pady=(8, 12))
         ttk.Checkbutton(handoff, text="Open validated output in", variable=self.auto_open).pack(side="left")
@@ -274,14 +331,6 @@ class StudioApp(tk.Tk):
         ttk.Button(slicer_target_row, text="Auto", command=self.reset_slicer_executable).pack(side="left", padx=(6, 0))
         ttk.Label(frame, textvariable=self.slicer_target_label, style="Small.TLabel").pack(anchor="w", pady=(0, 10))
 
-        slider = ttk.Frame(frame)
-        slider.pack(fill="x", pady=(0, 14))
-        ttk.Checkbutton(slider, text="Smart quality", variable=self.smart_quality).pack(side="left")
-        tk.Scale(
-            slider, from_=0, to=100, orient="horizontal", variable=self.quality_bias,
-            bg="#151719", fg="#d9e1e3", highlightthickness=0, troughcolor="#24282b",
-            activebackground="#55bdcf", length=220
-        ).pack(side="left", fill="x", expand=True, padx=(12, 0))
 
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x", pady=(4, 10))
@@ -333,12 +382,14 @@ class StudioApp(tk.Tk):
         self.accuracy_value = tk.StringVar(value="--%")
         self.confidence_value = tk.StringVar(value="--%")
         self.error_value = tk.StringVar(value="dE --")
+        self.mean_error_value = tk.StringVar(value="dE --")
         self.slots_value = tk.StringVar(value="No plan")
         metrics = ttk.Frame(forecast_row)
         metrics.pack(side="left", fill="both", expand=True, padx=(18, 0))
         for title, variable in [
             ("Estimated accuracy", self.accuracy_value),
             ("Confidence", self.confidence_value),
+            ("Mean color error", self.mean_error_value),
             ("Worst match", self.error_value),
             ("Palette", self.slots_value),
         ]:
@@ -371,6 +422,8 @@ class StudioApp(tk.Tk):
             self.project, self.reference, self.texture, self.custom, self.strategy,
             self.planner_mode, self.planning_sample, self.source, self.catalog_region,
             self.real_slots, self.max_output_colors, self.quality_bias, self.smart_quality,
+            self.direct_source_colors, self.output_color_strategy,
+
         ]
         for variable in watched:
             variable.trace_add("write", self.schedule_auto_preview)
@@ -382,6 +435,25 @@ class StudioApp(tk.Tk):
         self.custom.trace_add("write", self._update_filament_selection_summary)
         self._refresh_slicer_target_label()
         self._refresh_slicer_compatibility_warning()
+
+    def _update_palette_policy_hint(self, *_):
+        """Show budget semantics next to the control, not in a separate manual."""
+        fill = self.output_color_strategy.get() == "fill_palette"
+        self.palette_size_title.set("Target palette size" if fill else "Maximum palette size")
+        self.palette_size_help.set(
+            "Try to use this many distinct physical + mixed slots (32 max)."
+            if fill else "Upper limit for physical + mixed slots (32 max)."
+        )
+
+    def _toggle_advanced_settings(self):
+        if self.advanced_settings_expanded:
+            self.advanced_settings_frame.pack_forget()
+            self.advanced_settings_toggle.configure(text="Advanced settings  ▸")
+        else:
+            self.advanced_settings_frame.pack(fill="x", pady=(0, 8),
+                                              after=self.advanced_settings_toggle)
+            self.advanced_settings_toggle.configure(text="Advanced settings  ▾")
+        self.advanced_settings_expanded = not self.advanced_settings_expanded
 
     def combo(self, parent, title, variable, values, column, row=0):
         parent.columnconfigure(column, weight=1)
@@ -915,6 +987,7 @@ class StudioApp(tk.Tk):
         self.accuracy_value.set(f"{score:.0f}%")
         self.confidence_value.set(f"{confidence:.0f}%")
         self.error_value.set(f"dE {maximum:.1f}")
+        self.mean_error_value.set(f"dE {float(result.get('quality', {}).get('estimatedDeltaE', 0)):.2f}")
         self.slots_value.set(forecast["slotSummary"])
         self._draw_accuracy(score)
         self._draw_palette(forecast["colors"])
@@ -988,6 +1061,8 @@ class StudioApp(tk.Tk):
     def _update_plan_meshes(self, result):
         if not same_source_path(result.get("input"), self.project.get()):
             return
+        # Do not retain stale overlays from a previous quantized/direct plan.
+        self.preview_meshes.clear()
         assets = result.get("analysisAssets") or {}
         for label, key in (("Predicted", "predictedMesh"),
                            ("Color loss", "heatmapMesh"),
@@ -1188,12 +1263,50 @@ class StudioApp(tk.Tk):
     def convert(self):
         self.start_operation(plan_only=False)
 
+    def _show_incompatible_strategy(self, explanation):
+        """Clear stale metrics instead of showing an official plan for CMYKW."""
+        self.last_plan_result = None
+        self.forecast_suggestion = None
+        self.accuracy_value.set("--")
+        self.confidence_value.set("--")
+        self.error_value.set("--")
+        self.mean_error_value.set("--")
+        self.slots_value.set("No compatible plan")
+        self.suggestion_button.configure(state="disabled")
+        self._draw_accuracy(0, empty=True)
+        self._draw_palette([])
+        self.gap_message.set(explanation)
+        self.preview_meshes.clear()
+        self.preview_mode.set("Original")
+        self._show_preview_mode()
+        self.status.set(explanation)
+        self.output.delete("1.0", "end")
+        self.output.insert("1.0", explanation)
+
     def start_operation(self, plan_only, automatic=False, operation_revision=None):
         self.auto_preview_after = None
         if self.worker_active:
             if automatic:
                 self.auto_preview_dirty = True
             return
+        conflict = strategy_protection_conflict(
+            self.strategy.get(), self.solid_color_overrides
+        )
+        if conflict:
+            self._show_incompatible_strategy(conflict)
+            if automatic:
+                return
+            confirmed = messagebox.askyesno(
+                "CMYKW and Protected Solid Colors",
+                conflict + "\n\nClear these protected assignments and continue with CMYKW?"
+            )
+            if not confirmed:
+                return
+            self.solid_color_overrides.clear()
+            self.solid_override_summary.set("No protected source colors")
+            self._selected_source_color = None
+            self._update_solid_view_highlights()
+            self.schedule_auto_preview()
         source = Path(self.project.get())
         if not source.is_file() or source.suffix.lower() not in (".3mf", ".obj", ".glb"):
             if not automatic:
@@ -1229,6 +1342,9 @@ class StudioApp(tk.Tk):
             "planner_mode": self.planner_mode.get(),
             "planning_sample": self.planning_sample.get(),
             "real_slots": self.real_slots.get(),
+            "direct_source_colors": (
+                source.suffix.lower()==".3mf" and ENGINE.is_standard_colored_3mf(source)),
+            "output_color_strategy": self.output_color_strategy.get(),
             "max_output_colors": self.max_output_colors.get(),
             "quality_bias": "auto" if self.smart_quality.get() else self.quality_bias.get(),
             "mix_model": self.mix_model.get(),
@@ -1265,6 +1381,8 @@ class StudioApp(tk.Tk):
                 output_dir=source.parent,
                 reveal=False,
                 real_slots=options["real_slots"],
+                direct_source_colors=options["direct_source_colors"],
+                output_color_strategy=options["output_color_strategy"],
                 max_output_colors=options["max_output_colors"],
                 reference=options["reference"],
                 custom_catalog_path=options["custom"],
@@ -1344,6 +1462,9 @@ class StudioApp(tk.Tk):
             )
             self._resume_auto_preview_if_needed(force=True)
             return
+        decision = optimizer_decision_summary(result.get("warnings", []))
+        if decision:
+            text = decision + "\n\n" + text
         self.output.delete("1.0", "end")
         self.output.insert("1.0", text)
         self.update_forecast(result)
