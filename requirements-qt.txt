@@ -1,0 +1,3 @@
+# Optional preview-only dependency. Existing Windows/macOS release builds stay unchanged.
+# Install on a supported CPython environment (prefer Python 3.12 for parity with CI).
+PySide6>=6.8,<7
