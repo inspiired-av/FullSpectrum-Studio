@@ -88,6 +88,9 @@ class FilamentsTab(QWidget):
         self._source_signature = None
         self._load_serial = 0
         self._scan_serial = 0
+        self._source_scan_busy = False
+        self._source_scan_attempted = False
+        self._pending_assignment_colors = ()
         self._workers = []
         self._rows = []
         self._changing = False
@@ -190,13 +193,12 @@ class FilamentsTab(QWidget):
         self.protected_intro = _text('Assign source colors to enabled physical filaments. '
                                       'Assignments apply only to the selected model.', 'bodyMuted')
         lay.addWidget(self.protected_intro)
-        control = QHBoxLayout()
-        self.scan_button = QPushButton('Scan Source Colors')
-        self.scan_button.clicked.connect(self.scan_colors)
-        control.addWidget(self.scan_button)
-        self.protected_count = _text('No protected colors', 'helpText')
-        control.addWidget(self.protected_count, 1)
-        lay.addLayout(control)
+        # The same opened model supplies the Source Palette and this table.
+        # A read-only, authoritative protection scan runs automatically after
+        # the viewport loads; a second manual Scan button is unnecessary.
+        self.protected_count = _text('Open a 3MF to load source colors automatically.', 'helpText')
+        self.protected_count.setObjectName('sourceColorLoadStatus')
+        lay.addWidget(self.protected_count)
         self.solid_table = ToggleSourceTable(0, 3)
         self.solid_table.setObjectName('solidColorTable')
         self.solid_table.setHorizontalHeaderLabels(['Source color', 'Faces', 'Assigned filament'])
@@ -458,6 +460,11 @@ class FilamentsTab(QWidget):
 
     def set_model(self, path):
         self.model_path=str(path or '')
+        # A previous model's scan must never populate the new model's table.
+        self._scan_serial += 1
+        self._source_scan_busy = False
+        self._source_scan_attempted = False
+        self._pending_assignment_colors = ()
         self.preferences.use_model(self.model_path)
         self.source_colors={}
         self.source_color_selected.emit(None)
@@ -467,29 +474,88 @@ class FilamentsTab(QWidget):
         self.protected_intro.style().polish(self.protected_intro)
         self.protected_intro.setText('Assign source colors to enabled physical filaments. Assignments apply only to the selected model.')
         self.solid_table.setRowCount(0)
-        self.protected_count.setText('No protected colors')
+        self.protected_count.setText(
+            'Loading source colors after model preview…' if self.model_path.lower().endswith('.3mf')
+            else 'Solid-color assignment requires an original 3MF source.'
+        )
         self._update_actions()
 
+    def auto_load_source_colors(self):
+        """Start one authoritative scan for the current 3MF, after preview loading.
+
+        Mesh colors remain immediately available for display; the separate
+        engine/native scan verifies exactly which colors support assignments.
+        Never run duplicate scans for the same model or pop up a modal error.
+        """
+        if not self.model_path.lower().endswith('.3mf'):
+            return
+        if self._source_scan_attempted or self._source_scan_busy:
+            return
+        self.scan_colors()
+
+    def prepare_source_assignments(self, colors):
+        """Make the Source Palette's Assign Filament shortcut actionable.
+
+        Scans lazily, only when the source-color table has not been loaded.
+        Selected colors are restored after a successful asynchronous scan.
+        Neither scanning nor navigation assigns a filament automatically.
+        """
+        self._pending_assignment_colors = tuple(dict.fromkeys(
+            str(color).upper() for color in colors if color
+        ))
+        if not self._pending_assignment_colors:
+            return
+        if self.source_colors:
+            self._apply_pending_assignment_selection()
+        elif not self._source_scan_busy and not self._source_scan_attempted:
+            self.auto_load_source_colors()
+        # If scanning failed/was unsupported, leave the user's source-palette
+        # selection intact. The inline status explains why there are no rows.
+
+    def _apply_pending_assignment_selection(self):
+        selected = self._pending_assignment_colors
+        self._pending_assignment_colors = ()
+        if selected:
+            self.select_source_colors(selected)
+            if self._selected_colors():
+                # Focus the material selector, not Protect Selected: assignment
+                # is always an explicit action performed by the user.
+                self.target.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def scan_colors(self):
-        if not Path(self.model_path).is_file():
-            QMessageBox.information(self,'Protect Solid Colors','Select a 3MF model with color assignments first.')
+        # Internal asynchronous verifier, no longer a user-facing button.
+        if self._source_scan_busy or self._source_scan_attempted:
+            return
+        if not self.model_path.lower().endswith('.3mf') or not Path(self.model_path).is_file():
+            self.protected_count.setText('Solid-color assignment requires a readable 3MF model.')
             return
         self._scan_serial+=1
+        self._source_scan_busy = True
+        self._source_scan_attempted = True
         serial=self._scan_serial
         path=self.model_path
-        self.scan_button.setEnabled(False)
-        self.activity_event.emit('busy', 'Source colors', 'Scanning the selected model for source colors…')
+        self.activity_event.emit('busy', 'Source colors', 'Loading assignable source colors…')
         self.protected_count.setText('Reading exact source colors…')
         self._start(scan_source_colors,(path,),lambda data,error,s=serial,p=path:self._colors_loaded(s,p,data,error))
 
     def _colors_loaded(self, serial, path, data, error):
         if serial!=self._scan_serial or path!=self.model_path:
             return
-        self.scan_button.setEnabled(True)
+        self._source_scan_busy = False
         if error:
-            self.activity_event.emit('warning', 'Source colors', 'Source color scan failed: ' + str(error))
-            self.protected_count.setText('Unable to scan source colors')
-            QMessageBox.warning(self,'Protect Solid Colors',str(error))
+            self.activity_event.emit('warning', 'Source colors', 'Source color verification unavailable: ' + str(error))
+            self.protected_count.setText('Protection unavailable for this model: ' + str(error))
+            self.protected_intro.setObjectName('templateWarning')
+            style = self.protected_intro.style()
+            style.unpolish(self.protected_intro)
+            style.polish(self.protected_intro)
+            self.protected_intro.setText(
+                'The Source Palette can still display colors, but this source type cannot '
+                'be safely mapped to physical filaments. Details are below.'
+            )
+            # Keep the selection in the Source Palette; no misleading table rows.
+            self._pending_assignment_colors = ()
+            self._update_actions()
             return
         self.source_colors={str(k).upper():v for k,v in (data or {}).items()}
         self.activity_event.emit('success', 'Source colors',
@@ -515,6 +581,7 @@ class FilamentsTab(QWidget):
                 'Standard 3MF material colors: exact face-color assignments. '
                 'Protection choices are model-specific and UI-only until Stage 4.')
         self._populate_solid_colors()
+        self._apply_pending_assignment_selection()
         self.protections_changed.emit(dict(self.preferences.solid_assignments))
 
     def _populate_solid_colors(self):
@@ -568,6 +635,12 @@ class FilamentsTab(QWidget):
     def select_source_colors(self, colors):
         """Select exact source keys without sending signals back into the palette."""
         wanted = set(colors or ())
+        # A user may click the Source Palette before the automatic scan
+        # finishes. Restore that selection after the authoritative rows load.
+        if self._source_scan_busy and not self.source_colors:
+            self._pending_assignment_colors = tuple(dict.fromkeys(
+                str(color).upper() for color in (colors or ()) if color
+            ))
         with QSignalBlocker(self.solid_table):
             self.solid_table.clearSelection()
             self.solid_table.setCurrentCell(-1,-1)
@@ -643,7 +716,6 @@ class FilamentsTab(QWidget):
         self.clear_pins.setEnabled(has_options)
         self.save_button.setEnabled(has_options)
         self.revert_button.setEnabled(has_options)
-        self.scan_button.setEnabled(bool(self.model_path) and Path(self.model_path).is_file())
         selected = self._selected_colors()
         self.bulk_hint.setVisible(len(selected) > 1)
         self.protect_button.setEnabled(bool(selected) and self.target.count() > 0)

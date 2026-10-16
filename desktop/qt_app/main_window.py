@@ -1,6 +1,6 @@
-"""FullSpectrum Studio Qt frontend with Stage 3C source-color preview.
+"""FullSpectrum Studio Qt Stage 4A: read-only inspection and real plan forecasts.
 
-Rendering and file selection are read-only. Conversion remains in Tkinter.
+Conversion/export remain in the existing frontend until Stage 4D.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QScrollArea, QSlider, QSplitter, QTabWidget,
     QLineEdit, QCheckBox, QToolButton, QMessageBox, QFormLayout,
-    QVBoxLayout, QGridLayout, QWidget, QSizePolicy,
+    QVBoxLayout, QGridLayout, QWidget, QSizePolicy, QProgressBar,
 )
 
 from desktop.app_support import APP_VERSION
@@ -24,6 +24,9 @@ from desktop.qt_app.plan_preferences import (
 from desktop.qt_app.filaments_tab import FilamentsTab
 from desktop.qt_app.gl_viewport import ModelViewport
 from desktop.qt_app.preview_worker import ModelLoadWorker
+from desktop.qt_app.forecast_worker import ForecastWorker
+from desktop.qt_app.forecast_service import make_request
+from desktop.qt_app.forecast_view_state import ForecastViewState
 from desktop.qt_app.source_palette import PaletteSwatch, responsive_columns
 from desktop.qt_app.results_tab import ResultsTab
 from desktop.qt_app.shell_state import (
@@ -69,6 +72,16 @@ class MainWindow(QMainWindow):
         self._predicted_serial = 0
         self._predicted_filename = ""
         self.plan_preferences = PlanPreferences(settings_path)
+        self._forecast_view = ForecastViewState()  # Current model only; never saved to disk.
+        self._forecast_serial = 0
+        self._forecast_pending = False
+        self._forecast_task = None
+        self._inspection_serial = 0
+        self._inspection_threads = []
+        self._forecast_timer = QTimer(self)
+        self._forecast_timer.setSingleShot(True)
+        self._forecast_timer.setInterval(950)
+        self._forecast_timer.timeout.connect(self._request_forecast)
         self._loading_plan_ui = False
         self.setObjectName("qtMainWindow")
         self.setWindowTitle("FullSpectrum Studio — Qt UI Preview")
@@ -77,7 +90,7 @@ class MainWindow(QMainWindow):
         self._build()
         self._build_menus()
         self.statusBar().showMessage(
-            "Qt Stage 3C — gradient-aware source colors, synchronized selection, and optional protection highlighting; live forecasting and conversion remain in Stage 4."
+            "Qt Stage 4A — real read-only engine forecasts and project inspection; native 3MF export remains in Stage 4D."
         )
 
     def _build(self):
@@ -102,7 +115,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 3C", "badge"))
+        h.addWidget(_label("UI prototype · Stage 4A", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -195,9 +208,10 @@ class MainWindow(QMainWindow):
         self.tint_protected.setEnabled(False)
         self.tint_protected.toggled.connect(self.preview_surface.set_protected_overlay)
         title_row.addWidget(self.tint_protected)
-        self.manage_protection_button=QPushButton('Manage…')
+        self.manage_protection_button=QPushButton('Assign Filament…')
         self.manage_protection_button.setObjectName('manageProtectionShortcut')
-        self.manage_protection_button.setToolTip('Go to Filaments → Protect Solid Colors to assign a physical material.')
+        self.manage_protection_button.setEnabled(False)
+        self.manage_protection_button.setToolTip('Choose one or more source colors first; opens the matching filament assignment, scanning source colors automatically if needed.')
         self.manage_protection_button.clicked.connect(self._show_protection_controls)
         title_row.addWidget(self.manage_protection_button)
         self.clear_palette_button=QPushButton('Clear')
@@ -306,26 +320,63 @@ class MainWindow(QMainWindow):
         col.addWidget(_section_heading("Live Forecast"))
         panel = self._section()
         stats = QHBoxLayout(panel)
-        stats.setContentsMargins(14, 17, 14, 17)
+        stats.setContentsMargins(14, 14, 14, 14)
         self.accuracy = _label("—", "metricBig")
-        self.accuracy.setMinimumWidth(50)
+        self.accuracy.setObjectName('forecastAccuracy')
+        self.accuracy.setMinimumWidth(80)
         stats.addWidget(self.accuracy)
         detail = QVBoxLayout()
         detail.setSpacing(7)
-        for field in ("Estimated accuracy", "Confidence", "Worst match", "Palette"):
+        self.forecast_metrics = {}
+        for field in ("Confidence", "Worst match", "Palette"):
             line = QHBoxLayout()
             line.addWidget(_label(field, "bodyMuted"))
             line.addStretch()
-            line.addWidget(_label("—", "helpText"))
+            value = _label("—", "helpText")
+            self.forecast_metrics[field] = value
+            line.addWidget(value)
             detail.addLayout(line)
         stats.addLayout(detail, stretch=1)
         col.addWidget(panel)
+        progress_row = QHBoxLayout()
+        self.forecast_refresh = QPushButton('Refresh Forecast')
+        self.forecast_refresh.setObjectName('refreshForecastButton')
+        self.forecast_refresh.setEnabled(False)
+        self.forecast_refresh.clicked.connect(self._request_forecast)
+        progress_row.addWidget(self.forecast_refresh)
+        self.forecast_cancel = QPushButton('Cancel')
+        self.forecast_cancel.setObjectName('cancelForecastButton')
+        self.forecast_cancel.setEnabled(False)
+        self.forecast_cancel.clicked.connect(self._cancel_forecast)
+        progress_row.addWidget(self.forecast_cancel)
+        col.addLayout(progress_row)
+        self.forecast_progress = QProgressBar()
+        self.forecast_progress.setObjectName('forecastProgress')
+        self.forecast_progress.setRange(0, 100)
+        self.forecast_progress.setValue(0)
+        self.forecast_progress.setVisible(False)
+        col.addWidget(self.forecast_progress)
+        self.forecast_status = _label('Open a model to inspect and forecast its palette.', 'helpText', wrap=True)
+        self.forecast_status.setObjectName('forecastStatus')
+        self.forecast_status.setAccessibleName('Forecast status')
+        col.addWidget(self.forecast_status)
+        self.source_inspection = _label('Source: not inspected', 'bodyMuted', wrap=True)
+        self.source_inspection.setObjectName('sourceInspection')
+        col.addWidget(self.source_inspection)
         col.addWidget(_section_heading("Expected Palette"))
         forecast = self._section()
-        inner = _column(forecast, margins=(12, 12, 12, 12), spacing=3)
-        inner.addWidget(_label("No palette forecast available", "bodyMuted"))
-        inner.addWidget(_label("The forecast will be connected with the engine in Stage 4.",
-                               "helpText", wrap=True))
+        inner = _column(forecast, margins=(12, 12, 12, 12), spacing=7)
+        self.forecast_palette_label = _label('No forecast yet. Select Refresh Forecast to run the existing optimizer without exporting.', 'bodyMuted', wrap=True)
+        self.forecast_palette_label.setObjectName('forecastPaletteSummary')
+        inner.addWidget(self.forecast_palette_label)
+        self.forecast_swatch_panel = QWidget()
+        self.forecast_swatch_panel.setObjectName('forecastSwatches')
+        self.forecast_swatch_grid = QGridLayout(self.forecast_swatch_panel)
+        self.forecast_swatch_grid.setContentsMargins(0,0,0,0)
+        self.forecast_swatch_grid.setSpacing(5)
+        inner.addWidget(self.forecast_swatch_panel)
+        self.forecast_warning = _label('', 'helpText', wrap=True)
+        inner.addWidget(self.forecast_warning)
         col.addWidget(forecast)
         col.addWidget(_section_heading("Color Optimization"))
         col.addWidget(_label("Optimization strategy", "smallTitle"))
@@ -422,8 +473,8 @@ class MainWindow(QMainWindow):
         quality_controls.addWidget(self.quality_auto_badge)
         self.quality_bias_caption = QLabel("Quality vs. waste")
         form.addRow(self.quality_bias_caption, self.quality_bias_row)
-        self.auto_forecast = QCheckBox("Automatic forecast (Stage 4)")
-        self.auto_forecast.setToolTip("Preference saved now; automatic planning is not active yet.")
+        self.auto_forecast = QCheckBox("Automatic forecast")
+        self.auto_forecast.setToolTip("Refreshes the forecast after model or planning changes; uses the existing optimizer.")
         form.addRow(self.auto_forecast)
         self.auto_open = QCheckBox("Open validated output automatically (Stage 4)")
         self.auto_open.setToolTip("Preference saved now; no conversion is performed.")
@@ -467,7 +518,7 @@ class MainWindow(QMainWindow):
         self.compose_button.setObjectName("primary")
         _disabled(self.compose_button, "Conversion and export will be connected in Stage 4.")
         col.addWidget(self.compose_button)
-        col.addWidget(_label("Plan settings are active. Forecast and conversion will be connected in Stage 4.",
+        col.addWidget(_label("Planning runs as a read-only preview. 3MF conversion and export remain in Stage 4D.",
                                "helpText", wrap=True))
         self._restore_plan_widgets()
         self._wire_plan_widgets()
@@ -536,6 +587,24 @@ class MainWindow(QMainWindow):
         self.plan_preferences.set(field, value)
         self._refresh_dependent_plan_widgets()
         self._update_plan_dirty_state()
+        # Automatic forecasting is a scheduling preference, not a planner input.
+        # Turning it off must not erase (or invalidate) a successful result.
+        if field == 'auto_preview':
+            # Changing the scheduling preference does not invalidate the
+            # engine result. It only changes how an already-outdated forecast
+            # is presented, and whether a refresh is queued.
+            if value and self.state.model_path and self._original_mesh is not None and (self._forecast_view.stale or not self._forecast_view.has_previous):
+                self._forecast_timer.start()
+            elif not value:
+                self._forecast_timer.stop()
+                self._forecast_pending = False
+            if self._forecast_view.stale or not self._forecast_view.has_previous:
+                self._present_forecast_pending()
+            return
+        # Slicer launch settings do not affect the read-only palette forecast.
+        if field in ('auto_open', 'output_application', 'bambu_studio_executable', 'orcaslicer_executable'):
+            return
+        self._invalidate_forecast()
 
     def _refresh_dependent_plan_widgets(self):
         strategy = self.palette_strategy.currentData()
@@ -690,6 +759,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Plan edits discarded; settings reloaded from disk.")
         self.results_panel.record_event('Plan settings', 'Unsaved Plan edits reverted.', 'info')
         self._refresh_results_context()
+        self._invalidate_forecast()
 
     def _refresh_results_context(self):
         if not hasattr(self, 'results_panel'):
@@ -704,6 +774,8 @@ class MainWindow(QMainWindow):
     def _filament_activity(self, severity, title, message):
         self.results_panel.record_event(title, message, severity)
         self.statusBar().showMessage(message)
+        if (title in ('Filaments', 'Protected colors') and severity in ('success', 'info')) or (title == 'Filament source' and severity == 'success'):
+            self._invalidate_forecast()
 
     def _open_existing_report(self):
         self.tabs.setCurrentWidget(self.results_panel)
@@ -769,7 +841,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Let any 3MF/inventory reads finish so Qt never destroys a live QThread.
-        for worker in list(self.filaments_panel._workers) + list(self._preview_threads):
+        self._forecast_timer.stop()
+        if self._forecast_task is not None:
+            self._forecast_task.requestInterruption()
+        for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + ([self._forecast_task] if self._forecast_task is not None else []):
             if worker.isRunning():
                 worker.wait()
         super().closeEvent(event)
@@ -786,6 +861,7 @@ class MainWindow(QMainWindow):
         self.results_panel.record_event('Model selected', f'{name} selected; loading preview geometry.', 'busy')
         self._refresh_results_context()
         self._load_preview(path)
+        self._invalidate_forecast(clear_inspection=True)
 
     def _open_reference(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Visual Reference", "", REFERENCE_FILE_FILTER)
@@ -795,7 +871,8 @@ class MainWindow(QMainWindow):
             "Reference selected: " + display_filename(path) + " — not processed yet."
         )
         self.results_panel.record_event('Reference selected',
-                                        display_filename(path) + ' selected; not processed yet.', 'info')
+                                        display_filename(path) + ' selected for forecasting.', 'info')
+        self._invalidate_forecast()
 
     def _load_preview(self, path):
         self._preview_serial += 1
@@ -808,6 +885,7 @@ class MainWindow(QMainWindow):
         self._source_palette_selected=None
         self._preview_protected_colors=set()
         self.clear_palette_button.setEnabled(False)
+        self.manage_protection_button.setEnabled(False)
         self.tint_protected.setChecked(False)
         self.tint_protected.setEnabled(False)
         self.preview_surface.set_highlights(None, ())
@@ -855,12 +933,223 @@ class MainWindow(QMainWindow):
         self.preview_surface.set_wireframe(False)
         self.load_predicted_button.setEnabled(True)
         self._populate_source_palette(mesh)
+        # Populate Protect Solid Colors without making the user scan again.
+        # This uses the authoritative engine/native color scanner, not just
+        # render-time color averages or approximate visual gradients.
+        self.filaments_panel.auto_load_source_colors()
         suffix = ' · sampled display only' if mesh.sampled else ''
         info = f"{len(mesh.triangles):,} visible triangles / {mesh.source_triangles:,} source triangles{suffix}"
         self.preview_status.setText(info + ' · Left drag orbit · Right drag pan · Wheel zoom · R reset')
-        self.bottom_hint.setText('Original 3D colors loaded where available. Saved predicted OBJ can be previewed; live prediction and export arrive in Stage 4.')
+        self.bottom_hint.setText('Source geometry and colors loaded. Forecasts run on Plan; predicted 3D and export arrive in Stages 4C/4D.')
         self.statusBar().showMessage('3D preview ready: ' + info)
         self.results_panel.record_event('Model preview', info, 'success')
+        self.source_inspection.setText(f'Source geometry: {mesh.source_triangles:,} triangles; inspecting project metadata…')
+        self._start_inspection(path)
+        if self.auto_forecast.isChecked():
+            self._forecast_timer.start()
+
+    # Stage 4A: no 3MF export; all engine operations run on QThreads.
+    def _set_forecast_status(self, message, severity='normal'):
+        """Explicit severity is readable with or without Qt theme styling."""
+        self.forecast_status.setText(message)
+        self.forecast_status.setProperty('severity', severity)
+        styles = {
+            'error': 'color: #f38a86; font-weight: 600;',
+            'stale': 'color: #e9b66c; font-weight: 600;',
+            'busy': 'color: #80c8db;',
+        }
+        self.forecast_status.setStyleSheet(styles.get(severity, ''))
+
+    def _show_previous_forecast(self):
+        """Keep an earlier result visible without repeating refresh instructions."""
+        previous = self._forecast_view.previous
+        if previous is None:
+            return False
+        count = len(previous.get('forecast', {}).get('colors') or [])
+        self.forecast_palette_label.setText(f'Previous forecast · {count} planned colors')
+        # Color semantics belong in the single status line, not the palette.
+        self.forecast_palette_label.setStyleSheet('')
+        return True
+
+    def _present_forecast_pending(self):
+        """One actionable message for manual mode; no stale warning in auto mode."""
+        automatic = self.auto_forecast.isChecked()
+        if self._show_previous_forecast():
+            if automatic:
+                self._set_forecast_status('Updating forecast automatically…', 'busy')
+            else:
+                self._set_forecast_status(
+                    'Previous forecast is outdated — select Refresh Forecast to update.', 'stale')
+            return
+        self.forecast_palette_label.setText('No forecast yet')
+        self.forecast_palette_label.setStyleSheet('')
+        if automatic:
+            if self.state.model_path and self._original_mesh is not None:
+                self._set_forecast_status('Updating forecast automatically…', 'busy')
+            elif self.state.model_path:
+                self._set_forecast_status('Automatic forecast will start when the model is ready.')
+            else:
+                self._set_forecast_status('Open a model to start automatic forecasting.')
+        elif self.state.model_path:
+            self._set_forecast_status('Select Refresh Forecast to calculate a palette.')
+        else:
+            self._set_forecast_status('Open a model to calculate a forecast.')
+
+    def _invalidate_forecast(self, clear_inspection=False):
+        self._forecast_serial += 1
+        self._forecast_timer.stop()
+        self._forecast_pending = False
+        if self._forecast_task is not None:
+            self._forecast_task.requestInterruption()
+        if clear_inspection:
+            # Prevent ever displaying an unrelated model's last forecast.
+            self._forecast_view.reset(self.state.model_path)
+        else:
+            self._forecast_view.invalidate()
+        if not self._forecast_view.has_previous:
+            self.accuracy.setText('—')
+            for value in self.forecast_metrics.values():
+                value.setText('—')
+            self._render_forecast_palette([])
+            self.forecast_warning.clear()
+        # Previous metrics, swatches and details remain visible for this model.
+        # Do not show amber while an automatic refresh is already queued.
+        self._present_forecast_pending()
+        self.forecast_refresh.setEnabled(bool(self.state.model_path))
+        if clear_inspection:
+            self._inspection_serial += 1
+            self.source_inspection.setText('Source: not inspected')
+        if (self.auto_forecast.isChecked() and bool(self.state.model_path)
+                and self._original_mesh is not None):
+            self._forecast_timer.start()
+
+    def _start_inspection(self, path):
+        if not Path(path).is_file():
+            return
+        self._inspection_serial += 1
+        serial = self._inspection_serial
+        thread = ForecastWorker('inspection', path, self)
+        self._inspection_threads.append(thread)
+        thread.completed.connect(lambda result, error, s=serial, p=path: self._inspection_done(s,p,result,error))
+        thread.finished.connect(lambda t=thread: self._release_inspection(t))
+        thread.start()
+
+    def _release_inspection(self, thread):
+        if thread in self._inspection_threads:
+            self._inspection_threads.remove(thread)
+        thread.deleteLater()
+
+    def _inspection_done(self, serial, path, result, error):
+        if serial != self._inspection_serial or path != self.state.model_path:
+            return
+        if error:
+            self.source_inspection.setText('Project inspection unavailable: ' + str(error))
+            self.results_panel.record_event('Model inspection', str(error), 'warning')
+        else:
+            slots = result.get('sourceSlots')
+            label = (f'Engine source palette: {slots} slots' if slots is not None
+                     else result.get('note', 'Geometry inspected'))
+            if self._original_mesh is not None:
+                label += f' · {self._original_mesh.source_triangles:,} mesh triangles'
+            self.source_inspection.setText(label)
+            self.results_panel.record_event('Model inspection', label, 'success')
+
+    def _request_forecast(self):
+        path = self.state.model_path
+        if not path or not Path(path).is_file():
+            self._set_forecast_status('Choose a model before running a forecast.')
+            return
+        if self._forecast_task is not None:
+            self._forecast_pending = True
+            self._set_forecast_status('Waiting for the previous plan to finish before updating…', 'busy')
+            return
+        self._forecast_pending = False
+        serial = self._forecast_serial
+        request = make_request(path, self.state.reference_path,
+                               self.plan_preferences, self.filaments_panel.preferences)
+        thread = ForecastWorker('forecast', request, self)
+        self._forecast_task = thread
+        self.forecast_refresh.setEnabled(False)
+        self.forecast_cancel.setEnabled(True)
+        self.forecast_progress.setValue(0)
+        self.forecast_progress.setVisible(True)
+        self._set_forecast_status('Running the existing FullSpectrum palette planner…', 'busy')
+        self.results_panel.record_event('Live forecast', 'Read-only engine preview started.', 'busy')
+        thread.progress_changed.connect(lambda fraction, message, s=serial: self._forecast_progress_changed(s, fraction, message))
+        thread.completed.connect(lambda result, error, s=serial: self._forecast_done(s,result,error))
+        thread.finished.connect(lambda t=thread: self._release_forecast(t))
+        thread.start()
+
+    def _cancel_forecast(self):
+        self._forecast_serial += 1
+        self._forecast_pending = False
+        self._forecast_timer.stop()
+        if self._forecast_task is not None:
+            self._forecast_task.requestInterruption()
+        self.forecast_cancel.setEnabled(False)
+        self._set_forecast_status('Cancellation requested (at the next engine progress checkpoint).', 'stale')
+
+    def _forecast_progress_changed(self, serial, fraction, message):
+        if serial != self._forecast_serial:
+            return
+        self.forecast_progress.setValue(min(100,max(0,int(100*fraction))))
+        self._set_forecast_status(str(message), 'busy')
+
+    def _forecast_done(self, serial, result, error):
+        if serial != self._forecast_serial:
+            return  # Stale model/settings result must never update the UI.
+        if error:
+            self._forecast_view.invalidate()
+            if not self._show_previous_forecast():
+                self.forecast_palette_label.setText('No forecast yet')
+                self.forecast_palette_label.setStyleSheet('')
+            self._set_forecast_status('Forecast unavailable: ' + str(error), 'error')
+            self.results_panel.record_event('Live forecast', str(error), 'warning')
+            return
+        if not self._forecast_view.accept(self.state.model_path, result):
+            return  # Do not reuse a forecast for another model.
+        forecast = result['forecast']
+        self.accuracy.setText(f"{forecast['accuracy']:.0f}%")
+        self.forecast_metrics['Confidence'].setText(f"{forecast['confidence']:.0f}%")
+        self.forecast_metrics['Worst match'].setText(f"dE {forecast['maximumDeltaE']:.1f}")
+        self.forecast_metrics['Palette'].setText(forecast['slotSummary'])
+        colors = forecast['colors']
+        self._render_forecast_palette(colors)
+        self.forecast_palette_label.setText(f'{len(colors)} planned output colors · Estimated before slicing')
+        self.forecast_palette_label.setStyleSheet('')
+        warnings = result.get('warnings') or []
+        self.forecast_warning.setText(forecast.get('gapMessage') or ('Warnings: '+str(warnings[0]) if warnings else ''))
+        self._set_forecast_status('Read-only plan ready. No native 3MF was exported.')
+        self.results_panel.record_event('Live forecast',
+            f"Estimated quality {forecast['accuracy']:.1f}%, {forecast['slotSummary']}; no 3MF written.", 'success')
+
+    def _release_forecast(self, thread):
+        if self._forecast_task is thread:
+            self._forecast_task = None
+        self.forecast_progress.setVisible(False)
+        self.forecast_cancel.setEnabled(False)
+        self.forecast_refresh.setEnabled(bool(self.state.model_path))
+        thread.deleteLater()
+        if self._forecast_pending:
+            self._forecast_pending = False
+            QTimer.singleShot(0, self._request_forecast)
+
+    def _render_forecast_palette(self, colors):
+        from PySide6.QtGui import QColor
+        while self.forecast_swatch_grid.count():
+            item = self.forecast_swatch_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for index, color in enumerate(colors[:32]):
+            if not isinstance(color, str) or not QColor(color).isValid():
+                continue
+            swatch = QLabel('')
+            swatch.setMinimumHeight(23)
+            swatch.setMinimumWidth(16)
+            swatch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            swatch.setStyleSheet(f'background-color: {color}; border: 1px solid #5b6774; border-radius: 4px;')
+            swatch.setToolTip(f'Output slot {index+1}: {color}')
+            self.forecast_swatch_grid.addWidget(swatch, index//16, index%16)
 
     def _preview_render_error(self, message):
         self.preview_status.setText(message)
@@ -939,9 +1228,13 @@ class MainWindow(QMainWindow):
         self._select_palette_colors(selected)
 
     def _show_protection_controls(self):
+        # Preserve the Source Palette selection until the asynchronous scan
+        # populates the Filaments table; navigation alone cannot select rows.
+        selected = self._source_palette_selected_colors
+        if not selected or not self.state.model_path:
+            return
         self.tabs.setCurrentWidget(self.filaments_panel)
-        # Use the existing scanning workflow rather than duplicating material
-        # assignment controls beneath the preview.
+        self.filaments_panel.prepare_source_assignments(selected)
         def scroll_to_protection():
             content=self.filaments_panel.content
             label=self.filaments_panel.protected_intro
@@ -958,6 +1251,7 @@ class MainWindow(QMainWindow):
         self._source_palette_selected_colors = selected
         self._source_palette_selected = selected[-1] if selected else None
         self.clear_palette_button.setEnabled(bool(selected))
+        self.manage_protection_button.setEnabled(bool(selected) and bool(self.state.model_path))
         for swatch in self._source_palette_cells:
             swatch.set_selected(swatch.hex_color in selected)
         if selected:
@@ -1013,6 +1307,7 @@ class MainWindow(QMainWindow):
         self._source_palette_selected = None
         self._source_palette_selected_colors = ()
         self.clear_palette_button.setEnabled(False)
+        self.manage_protection_button.setEnabled(False)
         palette = tuple(getattr(mesh, 'palette_counts', ()))
         self._source_palette_counts = dict(palette)
         colors = len(palette)

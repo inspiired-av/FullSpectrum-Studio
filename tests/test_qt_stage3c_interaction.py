@@ -111,14 +111,42 @@ class QtBehaviorTests(unittest.TestCase):
             finally:
                 w.close()
 
-    def test_manage_shortcut_does_not_duplicate_controls(self):
+    def test_assign_shortcut_is_disabled_without_selection(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             w=MainWindow(settings_path=Path(tmp)/'s.json')
             try:
+                self.assertFalse(w.manage_protection_button.isEnabled())
+                self.assertNotEqual(w.tabs.currentWidget(), w.filaments_panel)
+                # Calling the handler directly must also do nothing without a
+                # selected source color; the button should not bypass this guard.
                 w._show_protection_controls()
-                self.assertIs(w.tabs.currentWidget(),w.filaments_panel)
-            finally:w.close()
+                self.assertNotEqual(w.tabs.currentWidget(), w.filaments_panel)
+            finally:
+                w.close()
+
+    def test_assign_shortcut_uses_selected_colors_without_duplicate_controls(self):
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            w=MainWindow(settings_path=Path(tmp)/'s.json')
+            try:
+                model_path = str(Path(tmp)/'source.3mf')
+                w.state.select_model(model_path)
+                w.filaments_panel.set_model(model_path)
+                # Exercise the real selection-to-button logic rather than
+                # navigating with no source colors selected.
+                w._source_palette_counts = {'#FF0000': 4, '#0000FF': 3}
+                w._select_palette_colors(('#FF0000', '#0000FF'))
+                self.assertTrue(w.manage_protection_button.isEnabled())
+                with (patch.object(w.filaments_panel, 'prepare_source_assignments') as prepare,
+                      patch.object(w.filaments_panel, 'on_selected')):
+                    w.manage_protection_button.click()
+                self.assertIs(w.tabs.currentWidget(), w.filaments_panel)
+                prepare.assert_called_once_with(('#FF0000', '#0000FF'))
+                self.assertEqual(w.tabs.count(), 3)
+            finally:
+                w.close()
 
 
 if __name__=='__main__':unittest.main()

@@ -1,5 +1,6 @@
 """Prevent Windows cp1252 failures and stale Qt stage labels."""
 import ast
+import re
 from pathlib import Path
 import unittest
 
@@ -20,8 +21,11 @@ class EncodingAndStageLabelTests(unittest.TestCase):
     def test_stage_3c_label_tracks_installed_features(self):
         path = Path(__file__).resolve().parents[1] / 'desktop/qt_app/main_window.py'
         content = path.read_text(encoding='utf-8')
-        self.assertIn('UI prototype · Stage 3C', content)
-        self.assertIn('Qt Stage 3C —', content)
+        match = re.search(r'UI prototype · Stage (\d+)([A-Z])', content)
+        self.assertIsNotNone(match, 'Missing Qt development-stage badge')
+        stage = (int(match.group(1)), match.group(2))
+        self.assertGreaterEqual(stage, (3, 'C'))
+        self.assertIn(f'Qt Stage {match.group(1)}{match.group(2)} —', content)
         self.assertNotIn('UI prototype · Stage 3B', content)
 
 
