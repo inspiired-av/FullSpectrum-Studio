@@ -86,6 +86,7 @@ jobs:
           --name FullSpectrumStudio
           --hidden-import fullspectrum_engine
           --hidden-import native_project_template
+          --hidden-import phase4_material_profiles
           --hidden-import direct_source_palette
           --hidden-import global_recipe_optimizer
           --hidden-import palette_budget_optimizer
