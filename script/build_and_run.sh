@@ -73,6 +73,10 @@ mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 cp "$ROOT_DIR/fullspectrum_engine.py" "$APP_RESOURCES/FullSpectrumEngine.py"
 cp "$ROOT_DIR/bambu_mixer_model.py" "$APP_RESOURCES/bambu_mixer_model.py"
+cp "$ROOT_DIR/native_project_template.py" "$APP_RESOURCES/native_project_template.py"
+cp "$ROOT_DIR/native_preview_thumbnail.py" "$APP_RESOURCES/native_preview_thumbnail.py"
+cp "$ROOT_DIR/standard_3mf_import.py" "$APP_RESOURCES/standard_3mf_import.py"
+cp "$ROOT_DIR/solid_color_overrides.py" "$APP_RESOURCES/solid_color_overrides.py"
 cp "$ROOT_DIR/LICENSE" "$APP_RESOURCES/LICENSE"
 cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$APP_RESOURCES/THIRD_PARTY_NOTICES.md"
 cp "$ROOT_DIR/VERSION" "$APP_RESOURCES/VERSION"
@@ -202,3 +206,5 @@ case "$MODE" in
     exit 2
     ;;
 esac
+
+# Native output-colors/thumbnail patch v1

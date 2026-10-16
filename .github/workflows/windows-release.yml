@@ -78,13 +78,15 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Validate Windows desktop shell
         run: |
-          python -m py_compile desktop/app_support.py desktop/full_spectrum_studio.py fullspectrum_engine.py bambu_mixer_model.py
+          python -m py_compile desktop/app_support.py desktop/full_spectrum_studio.py fullspectrum_engine.py bambu_mixer_model.py standard_3mf_import.py solid_color_overrides.py
           python -c "import desktop.full_spectrum_studio as app; assert app.APP_VERSION"
       - name: Build portable application
         run: >
           pyinstaller --noconfirm --windowed
           --name FullSpectrumStudio
           --hidden-import fullspectrum_engine
+          --hidden-import native_project_template
+          --hidden-import native_preview_thumbnail
           --hidden-import bambu_mixer_model
           --hidden-import json
           --hidden-import csv
@@ -103,6 +105,10 @@ jobs:
           --hidden-import collections
           --hidden-import functools
           --add-data "fullspectrum_engine.py;."
+          --add-data "native_project_template.py;."
+          --add-data "native_preview_thumbnail.py;."
+          --add-data "standard_3mf_import.py;."
+          --add-data "solid_color_overrides.py;."
           --add-data "bambu_mixer_model.py;."
           --add-data "LICENSE;."
           --add-data "THIRD_PARTY_NOTICES.md;."
@@ -206,3 +212,5 @@ jobs:
                 --notes-file "$NOTES_FILE"
             fi
           fi
+
+# Native output-colors/thumbnail patch v1

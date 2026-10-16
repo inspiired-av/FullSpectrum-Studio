@@ -15,6 +15,7 @@ CHOICES = {
     "source": {"inventory", "catalog", "all-bambu", "custom", "exact-cmykw"},
     "catalog_region": {"global", "eu", "us-ca", "uk", "au-nz", "asia"},
     "real_slots": {"auto", "2", "3", "4", "5", "6", "7", "8"},
+    "max_output_colors": {"auto"} | {str(i) for i in range(2,33)},
     "mix_model": {"bambu"},
     "output_application": {"Bambu Studio", "OrcaSlicer"},
 }
@@ -54,6 +55,13 @@ def validated_settings(data):
         keys = data.get(field)
         if isinstance(keys, list) and all(isinstance(key, str) and 0 < len(key) <= 256 for key in keys):
             clean[field] = sorted(set(keys))[:1000]
+    for field in ("bambu_studio_executable", "orcaslicer_executable"):
+        candidate = data.get(field)
+        if isinstance(candidate, str) and len(candidate) <= 8192 and "\x00" not in candidate:
+            clean[field] = candidate
+    template = data.get("native_project_template")
+    if isinstance(template, str) and len(template) <= 8192 and "\x00" not in template:
+        clean["native_project_template"] = template
     return clean
 
 
@@ -82,3 +90,5 @@ def save_settings(data, path=None):
         if os.path.exists(temporary):
             os.unlink(temporary)
     return destination
+
+# Native output-colors/thumbnail patch v1

@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,12 @@ from desktop.app_support import (
 )
 from desktop.filament_options import selectable_filament_options
 from desktop.settings_store import load_settings, save_settings
+from orca_profile_warning import orca_h2c_warning
+from native_project_template import inspect_template, TemplateError
+from desktop.slicer_launcher import find_windows_slicer
+from desktop.source_path_utils import same_source_path, find_original_material_source
+from desktop.windows_mesh_preview import MeshPreviewCanvas
+from desktop.source_color_preview import read_standard_color_mesh
 
 
 def load_engine():
@@ -58,18 +65,24 @@ class StudioApp(tk.Tk):
         self.reference = tk.StringVar()
         self.texture = tk.StringVar()
         self.custom = tk.StringVar()
+        self.native_project_template = tk.StringVar()
+        self.native_template_status = tk.StringVar(value="No template selected")
+        self.slicer_compatibility_status = tk.StringVar(value="")
         self.strategy = tk.StringVar(value="official")
         self.planner_mode = tk.StringVar(value="best")
         self.planning_sample = tk.StringVar(value="preview")
         self.source = tk.StringVar(value="inventory")
         self.catalog_region = tk.StringVar(value="global")
         self.real_slots = tk.StringVar(value="auto")
+        self.max_output_colors = tk.StringVar(value="auto")
         self.mix_model = tk.StringVar(value="bambu")
         self.quality_bias = tk.IntVar(value=60)
         self.smart_quality = tk.BooleanVar(value=True)
         self.auto_preview = tk.BooleanVar(value=True)
         self.auto_open = tk.BooleanVar(value=True)
         self.output_application = tk.StringVar(value="Bambu Studio")
+        self.slicer_executable_paths = {"bambu_studio_executable": "", "orcaslicer_executable": ""}
+        self.slicer_target_label = tk.StringVar(value="Automatic executable detection")
         self.progress = tk.DoubleVar(value=0)
         self.status = tk.StringVar(value="Choose a painted .3mf or textured OBJ / GLB source to begin.")
         self.cancel_requested = False
@@ -83,10 +96,20 @@ class StudioApp(tk.Tk):
         self.auto_preview_dirty = False
         self.auto_preview_after = None
         self.source_preview_photo = None
+        self.preview_mode = tk.StringVar(value="Original")
+        self.preview_meshes = {}
+        self._source_exact_mesh = None
+        self._selected_source_color = None
+        self._solid_selector_active = False
+        self.show_protected_overlay = tk.BooleanVar(value=False)
+        self._preview_mode_manually_selected = False
+        self._preview_request_id = 0
         self.last_plan_result = None
         self.inventory_snapshot = None
         self.disabled_anchor_keys = set()
         self.pinned_anchor_keys = set()
+        self.solid_color_overrides = {}
+        self.solid_override_summary = tk.StringVar(value="No protected source colors")
         self.filament_selection_summary = tk.StringVar(value="Loading filament colors...")
         self._restore_saved_settings()
         self._build()
@@ -98,25 +121,31 @@ class StudioApp(tk.Tk):
         settings = load_settings()
         fields = (
             "custom", "strategy", "planner_mode", "planning_sample", "source",
-            "catalog_region", "real_slots", "mix_model", "quality_bias",
+            "catalog_region", "real_slots", "max_output_colors", "mix_model", "quality_bias",
             "smart_quality", "auto_preview", "auto_open", "output_application",
+            "native_project_template",
         )
         for field in fields:
             if field in settings:
                 getattr(self, field).set(settings[field])
         self.disabled_anchor_keys = set(settings.get("disabled_anchor_keys", []))
         self.pinned_anchor_keys = set(settings.get("pinned_anchor_keys", []))
+        self._refresh_native_template_status()
+        for key in self.slicer_executable_paths:
+            self.slicer_executable_paths[key] = settings.get(key, "")
 
     def save_user_settings(self):
         """Persist settings to the user's config directory; do not bundle models."""
         fields = (
             "custom", "strategy", "planner_mode", "planning_sample", "source",
-            "catalog_region", "real_slots", "mix_model", "quality_bias",
+            "catalog_region", "real_slots", "max_output_colors", "mix_model", "quality_bias",
             "smart_quality", "auto_preview", "auto_open", "output_application",
+            "native_project_template",
         )
         settings = {field: getattr(self, field).get() for field in fields}
         settings["disabled_anchor_keys"] = sorted(self.disabled_anchor_keys)
         settings["pinned_anchor_keys"] = sorted(self.pinned_anchor_keys)
+        settings.update(self.slicer_executable_paths)
         try:
             save_settings(settings)
         except OSError as error:
@@ -182,6 +211,21 @@ class StudioApp(tk.Tk):
             ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
             ttk.Button(row, text="Browse", command=action).pack(side="left", padx=(8, 0))
 
+        # A native project template carries the printer/process/plate profile,
+        # separately from the custom filament palette used by the color planner.
+        ttk.Label(frame, text="Native Project Template (.3mf)", style="Small.TLabel").pack(anchor="w", pady=(12, 3))
+        template_row = ttk.Frame(frame)
+        template_row.pack(fill="x")
+        ttk.Entry(template_row, textvariable=self.native_project_template).pack(side="left", fill="x", expand=True)
+        ttk.Button(template_row, text="Browse", command=self.choose_native_template).pack(side="left", padx=(8, 0))
+        template_actions = ttk.Frame(frame)
+        template_actions.pack(fill="x", pady=(4, 0))
+        ttk.Button(template_actions, text="About templates", command=self.show_native_template_help).pack(side="left")
+        ttk.Button(template_actions, text="Clear", command=self.clear_native_template).pack(side="left", padx=(7, 0))
+        ttk.Label(frame, textvariable=self.native_template_status, style="Small.TLabel", wraplength=400).pack(anchor="w", pady=(5, 0))
+        ttk.Label(frame, textvariable=self.slicer_compatibility_status,
+                  style="Warning.TLabel", wraplength=400, justify="left").pack(anchor="w", pady=(2, 0))
+
         ttk.Separator(frame).pack(fill="x", pady=18)
         ttk.Label(frame, text="PLAN", style="Section.TLabel").pack(anchor="w", pady=(0, 8))
         choices = ttk.Frame(frame)
@@ -192,6 +236,14 @@ class StudioApp(tk.Tk):
         self.combo(choices, "Physical slots", self.real_slots, ["auto", "2", "3", "4", "5", "6", "7", "8"], 0, 1)
         self.combo(choices, "Catalog region", self.catalog_region, ["global", "eu", "us-ca", "uk", "au-nz", "asia"], 1, 1)
         self.combo(choices, "Planning sample", self.planning_sample, ["paint", "preview"], 2, 1)
+        limit_row=ttk.Frame(frame)
+        limit_row.pack(fill="x", pady=(0, 7))
+        ttk.Label(limit_row, text="Max output colors", style="Small.TLabel").pack(side="left")
+        ttk.Combobox(limit_row, textvariable=self.max_output_colors,
+                     values=["auto"]+[str(i) for i in range(2,33)],
+                     state="readonly", width=8).pack(side="left", padx=(9, 8))
+        ttk.Label(limit_row, text="total physical + mixed; up to 32",
+                  style="Small.TLabel").pack(side="left")
 
         filament_row = ttk.Frame(frame)
         filament_row.pack(fill="x", pady=(2, 10))
@@ -203,6 +255,10 @@ class StudioApp(tk.Tk):
         ttk.Label(
             filament_row, textvariable=self.filament_selection_summary, style="Small.TLabel"
         ).pack(side="left", padx=(10, 0), fill="x", expand=True)
+        solids_row = ttk.Frame(frame)
+        solids_row.pack(fill="x", pady=(0, 12))
+        ttk.Button(solids_row, text="Protect Solid Colors", command=self.open_solid_color_selector).pack(side="left")
+        ttk.Label(solids_row, textvariable=self.solid_override_summary, style="Small.TLabel").pack(side="left", padx=(10, 0))
 
         handoff = ttk.Frame(frame)
         handoff.pack(fill="x", pady=(8, 12))
@@ -211,6 +267,12 @@ class StudioApp(tk.Tk):
             handoff, textvariable=self.output_application,
             values=["Bambu Studio", "OrcaSlicer"], state="readonly", width=18
         ).pack(side="left", padx=(8, 0))
+        # Explicit build selection supports standalone/portable and nightly slicers.
+        slicer_target_row = ttk.Frame(frame)
+        slicer_target_row.pack(fill="x", pady=(0, 8))
+        ttk.Button(slicer_target_row, text="Choose slicer EXE", command=self.choose_slicer_executable).pack(side="left")
+        ttk.Button(slicer_target_row, text="Auto", command=self.reset_slicer_executable).pack(side="left", padx=(6, 0))
+        ttk.Label(frame, textvariable=self.slicer_target_label, style="Small.TLabel").pack(anchor="w", pady=(0, 10))
 
         slider = ttk.Frame(frame)
         slider.pack(fill="x", pady=(0, 14))
@@ -239,12 +301,30 @@ class StudioApp(tk.Tk):
 
         forecast_header = ttk.Frame(right)
         forecast_header.pack(fill="x", pady=(0, 9))
-        ttk.Label(forecast_header, text="LIVE FORECAST", style="Section.TLabel").pack(side="left")
+        ttk.Label(forecast_header, text="MODEL PREVIEW", style="Section.TLabel").pack(side="left")
         ttk.Checkbutton(forecast_header, text="Automatic", variable=self.auto_preview).pack(side="right")
+        ttk.Button(forecast_header, text="Reset View", command=self._reset_preview_camera).pack(side="right", padx=(6, 8))
+        self.preview_mode_combo = ttk.Combobox(
+            forecast_header, textvariable=self.preview_mode,
+            values=["Original", "Predicted", "Color loss", "Anchor influence", "Wireframe"],
+            state="readonly", width=17,
+        )
+        self.preview_mode_combo.pack(side="right", padx=(8, 2))
+        self.preview_mode_combo.bind("<<ComboboxSelected>>", self._select_preview_mode)
 
-        self.preview_canvas = tk.Canvas(right, height=300, bg="#0f1112", highlightthickness=1, highlightbackground="#30363a")
+        self.preview_canvas = MeshPreviewCanvas(
+            right, height=350, bg="#0f1112", highlightthickness=1,
+            highlightbackground="#30363a", cursor="fleur",
+        )
         self.preview_canvas.pack(fill="x")
-        self.preview_canvas.create_text(260, 150, text="Open a model to preview", fill="#768187", font=("Segoe UI", 13))
+        self.preview_canvas.create_text(260, 175, text="Open a model to preview", fill="#768187", font=("Segoe UI", 13))
+        ttk.Label(right, text="Drag to orbit  •  Scroll to zoom  •  Reset View to recenter",
+                  style="Small.TLabel").pack(anchor="w", pady=(5, 0))
+        ttk.Checkbutton(
+            right, text="Show protected faces (teal)",
+            variable=self.show_protected_overlay,
+            command=self._update_solid_view_highlights,
+        ).pack(anchor="w", pady=(1, 0))
 
         forecast_row = ttk.Frame(right, padding=(0, 14, 0, 8))
         forecast_row.pack(fill="x")
@@ -271,6 +351,9 @@ class StudioApp(tk.Tk):
         ttk.Label(right, text="EXPECTED PALETTE", style="Section.TLabel").pack(anchor="w", pady=(7, 6))
         self.palette_canvas = tk.Canvas(right, height=44, bg="#151719", highlightthickness=0)
         self.palette_canvas.pack(fill="x")
+        self.palette_allocation_status = tk.StringVar(value="")
+        ttk.Label(right, textvariable=self.palette_allocation_status,
+                  style="Small.TLabel").pack(anchor="w", pady=(0, 5))
         self.gap_message = tk.StringVar(value="")
         gap_row = ttk.Frame(right)
         gap_row.pack(fill="x", pady=(5, 8))
@@ -287,13 +370,18 @@ class StudioApp(tk.Tk):
         watched = [
             self.project, self.reference, self.texture, self.custom, self.strategy,
             self.planner_mode, self.planning_sample, self.source, self.catalog_region,
-            self.real_slots, self.quality_bias, self.smart_quality,
+            self.real_slots, self.max_output_colors, self.quality_bias, self.smart_quality,
         ]
         for variable in watched:
             variable.trace_add("write", self.schedule_auto_preview)
         self.auto_preview.trace_add("write", self.schedule_auto_preview)
+        self.project.trace_add("write", self._clear_model_solid_overrides)
+        self.output_application.trace_add("write", self._refresh_slicer_target_label)
+        self.output_application.trace_add("write", self._refresh_slicer_compatibility_warning)
         self.source.trace_add("write", self._update_filament_selection_summary)
         self.custom.trace_add("write", self._update_filament_selection_summary)
+        self._refresh_slicer_target_label()
+        self._refresh_slicer_compatibility_warning()
 
     def combo(self, parent, title, variable, values, column, row=0):
         parent.columnconfigure(column, weight=1)
@@ -310,6 +398,281 @@ class StudioApp(tk.Tk):
     def _finish_inventory_refresh(self, snapshot):
         self.inventory_snapshot = snapshot
         self._update_filament_selection_summary()
+
+    def _clear_model_solid_overrides(self, *_):
+        """Overrides belong to the imported model, not user-global preferences."""
+        self.solid_color_overrides.clear()
+        self.solid_override_summary.set("No protected source colors")
+
+    def open_solid_color_selector(self):
+        """Load exact source colors off-thread, with all Tk operations on the GUI thread."""
+        source = Path(self.project.get())
+        if not source.is_file() or source.suffix.lower() != ".3mf":
+            messagebox.showerror("Protect Solid Colors", "Select a standard colored 3MF model first.")
+            return
+        try:
+            if not ENGINE.is_standard_colored_3mf(source):
+                original = find_original_material_source(
+                    source, ENGINE.is_standard_colored_3mf
+                )
+                if original is None:
+                    raise ValueError(
+                        "This SOURCE is a slicer-native or FullSpectrum-generated 3MF, "
+                        "not an original material-colored 3MF.\n\n"
+                        f"Selected: {source.name}\n\n"
+                        "Protect Solid Colors currently needs the original "
+                        "material-colored source (for example, "
+                        "VSLA v4_SOLID_NoFilter.3mf). Choose it under "
+                        "'Painted 3MF or textured model'.\n\n"
+                        "Keep your H2C Bambu/Orca blank project under "
+                        "'Native Project Template'. That template is not a "
+                        "source model and does not disable solid-color protection."
+                    )
+                if not messagebox.askyesno(
+                    "Use original colored 3MF?",
+                    "You selected a FullSpectrum-generated project rather "
+                    "than its original material-colored model.\n\n"
+                    f"Current: {source.name}\n"
+                    f"Original: {original.name}\n\n"
+                    "Switch SOURCE to the original so Protect Solid Colors "
+                    "can use the exact imported colors?\n\n"
+                    "Your Native Project Template selection will be retained.",
+                    parent=self,
+                ):
+                    return
+                self.project.set(str(original))
+                self.load_source_thumbnail(str(original))
+                source = original
+            options = [
+                item for item in self._filament_options()
+                if item["key"] not in self.disabled_anchor_keys
+            ]
+        except (OSError, ValueError, RuntimeError) as error:
+            self.status.set("Unable to open solid-color selector.")
+            messagebox.showerror("Protect Solid Colors", str(error))
+            return
+        if not options:
+            self.status.set("No enabled filaments available for solid-color protection.")
+            messagebox.showerror(
+                "Protect Solid Colors",
+                "Choose and enable a custom or Bambu filament source first."
+            )
+            return
+
+        # Each click gets its own token and channel. An obsolete scan cannot
+        # open a dialog after a different model or newer scan is selected.
+        token = object()
+        self._solid_color_scan_token = token
+        channel = queue.Queue(maxsize=1)
+        self.status.set("Reading exact source colors for solid-filament selection...")
+
+        def worker():
+            try:
+                result = ("ok", ENGINE.available_solid_source_colors(source))
+            except Exception as error:
+                result = ("error", str(error) or type(error).__name__)
+            # Never call Tk/Tcl methods from this worker thread.
+            channel.put(result)
+
+        def poll():
+            if getattr(self, "_solid_color_scan_token", None) is not token:
+                return
+            if not same_source_path(self.project.get(), source):
+                self.status.set("Solid-color scan cancelled: source model changed.")
+                return
+            try:
+                outcome, payload = channel.get_nowait()
+            except queue.Empty:
+                self.after(80, poll)
+                return
+            self._solid_color_scan_token = None
+            if outcome == "error":
+                self.status.set("Failed to read exact source colors.")
+                messagebox.showerror("Protect Solid Colors", payload)
+                return
+            if not payload:
+                self.status.set("No supported colored faces were found in this model.")
+                messagebox.showwarning("Protect Solid Colors", "This 3MF contains no supported face colors.")
+                return
+            try:
+                self._show_solid_color_selector(source, payload, options)
+                self.status.set(
+                    f"Loaded {len(payload)} exact source colors. Select the colors to protect."
+                )
+            except Exception as error:
+                # Tk callbacks otherwise only print to stderr and can leave the
+                # status stuck on 'Reading...' in a windowed executable.
+                self.status.set("Could not display the solid-color selector.")
+                messagebox.showerror(
+                    "Protect Solid Colors",
+                    f"Source colors loaded, but the selector could not open:\n{error}"
+                )
+                raise  # Keep the full traceback in the terminal/debug log.
+
+        # Schedule polling from the UI thread before starting the worker.
+        self.after(80, poll)
+        threading.Thread(target=worker, daemon=True, name="SolidColorScan").start()
+
+    def _update_solid_view_highlights(self):
+        """Show selections during editing, protected faces only when requested."""
+        show_protected = self._solid_selector_active or self.show_protected_overlay.get()
+        self.preview_canvas.set_highlights(
+            selected=self._selected_source_color if self._solid_selector_active else None,
+            protected=self.solid_color_overrides if show_protected else (),
+        )
+
+    def _set_source_color_highlight(self, selected_color):
+        """Identify exact source faces while the protected-color dialog is open."""
+        self._selected_source_color = selected_color
+        self._update_solid_view_highlights()
+        if getattr(self, "_source_exact_mesh", None):
+            self.preview_mode.set("Original")
+            self._preview_mode_manually_selected = True
+            self._show_preview_mode()
+
+    def _show_solid_color_selector(self, source, counts, options):
+        if not same_source_path(self.project.get(), source):
+            return
+        if not counts or not options:
+            messagebox.showwarning("Protect Solid Colors", "No colored faces or available filaments were found.")
+            return
+        panel = tk.Toplevel(self)
+        panel.title("Protected Solid Colors")
+        panel.geometry("840x650")
+        panel.minsize(680, 520)
+        panel.transient(self)
+        self._solid_selector_active = True
+
+        ttk.Label(panel, text="Choose a 3MF source color and assign a physical filament."
+                  " Amber faces = current selection; teal faces = already protected.",
+                  wraplength=780).pack(anchor="w", padx=14, pady=(14, 8))
+        ttk.Label(panel, text="Exact source colors (before 32-slot quantization)").pack(anchor="w", padx=14)
+
+        colors = list(counts)
+        color_area = ttk.Frame(panel)
+        color_area.pack(fill="both", expand=True, padx=14, pady=(4, 9))
+        color_list = tk.Listbox(color_area, height=12, exportselection=False,
+                                font=("Consolas", 10), selectmode="browse",
+                                selectbackground="#ffcf65", selectforeground="#181818",
+                                highlightthickness=0, relief="flat")
+        color_scroll = ttk.Scrollbar(color_area, orient="vertical", command=color_list.yview)
+        color_list.configure(yscrollcommand=color_scroll.set)
+        color_list.pack(side="left", fill="both", expand=True)
+        color_scroll.pack(side="right", fill="y")
+
+        preview_row = ttk.Frame(panel)
+        preview_row.pack(fill="x", padx=14, pady=(0, 10))
+        ttk.Label(preview_row, text="Selected source color:").pack(side="left")
+        color_patch = tk.Canvas(preview_row, width=35, height=25, bg="#9098A8",
+                                borderwidth=0, highlightthickness=1,
+                                highlightbackground="#646a6f")
+        color_patch.pack(side="left", padx=(10, 8))
+        selected_label = ttk.Label(preview_row, text="", style="Small.TLabel")
+        selected_label.pack(side="left", fill="x", expand=True)
+
+        ttk.Label(panel, text="Force this physical filament").pack(anchor="w", padx=14)
+        filaments = {f"{item['name']} ({item['color']}) [{item['key']}]": item
+                     for item in options}
+        filament_label = tk.StringVar(value=next(iter(filaments)))
+        filament_row = ttk.Frame(panel)
+        filament_row.pack(fill="x", padx=14, pady=(4, 10))
+        filament_box = ttk.Combobox(filament_row, textvariable=filament_label,
+                                    values=list(filaments), state="readonly")
+        filament_box.pack(side="left", fill="x", expand=True)
+        filament_patch = tk.Canvas(filament_row, width=35, height=26, bg="#9199A4",
+                                   borderwidth=0, highlightthickness=1,
+                                   highlightbackground="#646a6f")
+        filament_patch.pack(side="left", padx=(8, 0))
+
+        columns = ("source", "filament")
+        table = ttk.Treeview(panel, columns=columns, show="headings", height=6, selectmode="extended")
+        table.heading("source", text="Protected source color")
+        table.heading("filament", text="Solid physical filament")
+        table.column("source", width=180, stretch=False)
+        table.column("filament", width=550)
+        table.pack(fill="both", expand=True, padx=14, pady=(4, 8))
+
+        def contrast(hex_color):
+            channels = [int(hex_color[i:i+2], 16) for i in (1, 3, 5)]
+            return "#101115" if sum(x*w for x,w in zip(channels,(0.299,0.587,0.114))) > 142 else "#F6F8F9"
+
+        def update_filament_patch(*_):
+            chosen = filaments.get(filament_label.get())
+            if chosen:
+                filament_patch.configure(bg=chosen["color"])
+
+        def selected_color():
+            choices = color_list.curselection()
+            return colors[choices[0]] if choices else None
+
+        def select_color(*_):
+            color = selected_color()
+            if not color:
+                return
+            color_patch.configure(bg=color)
+            suffix = "  •  PROTECTED" if color in self.solid_color_overrides else ""
+            selected_label.configure(text=f"{color}  •  {counts[color]:,} faces{suffix}")
+            self._set_source_color_highlight(color)
+
+        def refresh(select=None):
+            current = select or selected_color() or (colors[0] if colors else None)
+            color_list.delete(0, "end")
+            for index, color in enumerate(colors):
+                marker = "[SOLID]" if color in self.solid_color_overrides else "       "
+                color_list.insert("end", f"{marker}  {color}    {counts[color]:>7,} faces")
+                color_list.itemconfig(index, background=color, foreground=contrast(color))
+            if current in colors:
+                idx = colors.index(current)
+                color_list.selection_set(idx)
+                color_list.see(idx)
+            for iid in table.get_children():
+                table.delete(iid)
+            for color, key in sorted(self.solid_color_overrides.items()):
+                label = next((item["name"] + " (" + item["color"] + ")"
+                              for item in options if item["key"] == key), key)
+                table.insert("", "end", iid=color, values=(f"■  {color}", label))
+            amount = len(self.solid_color_overrides)
+            self.solid_override_summary.set(f"{amount} protected solid color(s)" if amount
+                                            else "No protected source colors")
+            self._update_solid_view_highlights()
+            select_color()
+
+        def add():
+            color = selected_color()
+            chosen = filaments.get(filament_label.get())
+            if not color or not chosen:
+                return
+            self.solid_color_overrides[color] = chosen["key"]
+            refresh(color)
+            self.schedule_auto_preview()
+
+        def remove():
+            items = table.selection()
+            for color in items:
+                self.solid_color_overrides.pop(color, None)
+            refresh()
+            if items:
+                self.schedule_auto_preview()
+
+        controls = ttk.Frame(panel)
+        controls.pack(fill="x", padx=14, pady=(0, 14))
+        ttk.Button(controls, text="Add / Update Rule", command=add).pack(side="left")
+        ttk.Button(controls, text="Remove Selected", command=remove).pack(side="left", padx=(8, 0))
+        def close_dialog():
+            self._solid_selector_active = False
+            self._selected_source_color = None
+            self._update_solid_view_highlights()
+            panel.destroy()
+
+        panel.protocol("WM_DELETE_WINDOW", close_dialog)
+        ttk.Button(controls, text="Done", command=close_dialog).pack(side="right")
+        color_list.bind("<<ListboxSelect>>", select_color)
+        filament_box.bind("<<ComboboxSelected>>", update_filament_patch)
+        update_filament_patch()
+        refresh()
+        panel.deiconify()
+        panel.lift()
+        panel.focus_force()
 
     def _filament_options(self):
         try:
@@ -555,11 +918,19 @@ class StudioApp(tk.Tk):
         self.slots_value.set(forecast["slotSummary"])
         self._draw_accuracy(score)
         self._draw_palette(forecast["colors"])
+        requested = self.max_output_colors.get()
+        count = len(result.get("outputColors") or forecast["colors"])
+        if requested == "auto":
+            self.palette_allocation_status.set(f"Using {count} total colors (Auto)")
+        else:
+            detail = "All allowed slots used" if count == int(requested) else "Only useful printable recipes added"
+            self.palette_allocation_status.set(f"Using {count}/{requested} total colors — {detail}")
 
         suggestion = forecast["suggestion"]
         self.forecast_suggestion = suggestion
         self.suggestion_button.configure(state="normal" if suggestion else "disabled")
         self.gap_message.set(forecast["gapMessage"])
+        self._update_plan_meshes(result)
 
     def use_forecast_suggestion(self):
         suggestion = getattr(self, "forecast_suggestion", None)
@@ -576,32 +947,122 @@ class StudioApp(tk.Tk):
             self._update_filament_selection_summary()
         self.schedule_auto_preview()
 
+    def _reset_preview_camera(self):
+        self.preview_canvas.reset_camera()
+
+    def _select_preview_mode(self, *_):
+        self._preview_mode_manually_selected = True
+        self._show_preview_mode()
+
+    def _show_preview_mode(self):
+        selected = self.preview_mode.get()
+        if selected in ("Original", "Wireframe") and self._source_exact_mesh:
+            try:
+                self.preview_canvas.selected_color = (self._selected_source_color
+                    if self._solid_selector_active else None)
+                self.preview_canvas.protected_colors = (set(self.solid_color_overrides)
+                    if self._solid_selector_active or self.show_protected_overlay.get() else set())
+                self.preview_canvas.load_source_mesh(*self._source_exact_mesh)
+                self.preview_canvas.wireframe = (selected == "Wireframe")
+                if selected == "Wireframe":
+                    self.preview_canvas.redraw()
+                return
+            except (OSError, ValueError) as error:
+                self._show_preview_message(f"Couldn't display original model\n{error}")
+                return
+        key = "Original" if selected == "Wireframe" else selected
+        candidate = self.preview_meshes.get(key)
+        if candidate and Path(candidate).is_file():
+            try:
+                self.preview_canvas.set_highlights(selected=None, protected=())
+                self.preview_canvas.load_mesh(candidate, wireframe=(selected == "Wireframe"))
+                return
+            except (OSError, ValueError) as error:
+                self._show_preview_message(f"Couldn't display {selected.lower()} mesh\n{error}")
+                return
+        if selected == "Original":
+            self._show_preview_message("Loading source 3D model..." if self.project.get() else "Open a model to preview")
+        else:
+            self._show_preview_message("Run Preview Plan to generate this view.")
+
+    def _update_plan_meshes(self, result):
+        if not same_source_path(result.get("input"), self.project.get()):
+            return
+        assets = result.get("analysisAssets") or {}
+        for label, key in (("Predicted", "predictedMesh"),
+                           ("Color loss", "heatmapMesh"),
+                           ("Anchor influence", "anchorInfluenceMesh")):
+            value = assets.get(key)
+            if value and Path(value).is_file():
+                self.preview_meshes[label] = str(value)
+        if "Predicted" in self.preview_meshes and not self._preview_mode_manually_selected:
+            self.preview_mode.set("Predicted")
+        self._show_preview_mode()
+
     def load_source_thumbnail(self, path):
         source = Path(path)
-        if source.suffix.lower() != ".3mf":
-            self._show_preview_message("Textured source selected\nForecast palette will appear after planning")
+        self._preview_request_id += 1
+        request_id = self._preview_request_id
+        self.preview_meshes.clear()
+        self._source_exact_mesh = None
+        self._selected_source_color = None
+        self._solid_selector_active = False
+        self.preview_canvas.set_highlights(selected=None, protected=())
+        self._preview_mode_manually_selected = False
+        self.last_plan_result = None
+        self.preview_mode.set("Original")
+        self._show_preview_mode()
+        if source.suffix.lower() not in (".3mf", ".obj", ".glb"):
+            self._show_preview_message("Choose a colored 3MF or textured OBJ/GLB model")
             return
-        destination = Path(tempfile.gettempdir()) / f"fullspectrum-source-{time.time_ns()}.png"
+        directory = Path(tempfile.gettempdir()) / "FullSpectrumStudio" / "windows-viewer"
+        destination = directory / f"source-{time.time_ns()}.png"
+        mesh_destination = destination.with_suffix(".obj")
+
+        channel = queue.Queue(maxsize=1)
+        texture = self.texture.get() or None
 
         def worker():
             try:
-                inspected = ENGINE.inspect_project(source, thumbnail_dest=destination, metadata_only=True)
-                thumbnail = inspected.get("thumbnail")
-                def display_thumbnail():
-                    if self.project.get() == str(source):
-                        self._show_source_thumbnail(thumbnail)
-                    elif thumbnail:
-                        Path(thumbnail).unlink(missing_ok=True)
-                self.after(0, display_thumbnail)
-            except Exception:
-                destination.unlink(missing_ok=True)
-                self.after(
-                    0,
-                    lambda: self._show_preview_message("Source loaded\nPreview image unavailable")
-                    if self.project.get() == str(source) else None,
+                inspected = ENGINE.inspect_project(
+                    source, thumbnail_dest=destination, preview_mesh_dest=mesh_destination,
+                    texture_override=texture, metadata_only=False,
                 )
+                # Keep the original 3MF's exact face colors for selection
+                # highlighting; the ordinary engine display remains the fallback.
+                if source.suffix.lower() == ".3mf" and ENGINE.is_standard_colored_3mf(source):
+                    try:
+                        inspected["_exactSourcePreview"] = read_standard_color_mesh(source)
+                    except (OSError, ValueError, RuntimeError):
+                        inspected["_exactSourcePreview"] = None
+                channel.put(("ok", inspected))
+            except Exception as error:
+                channel.put(("error", str(error) or type(error).__name__))
 
-        threading.Thread(target=worker, daemon=True).start()
+        def poll():
+            if request_id != self._preview_request_id or not same_source_path(self.project.get(), source):
+                return
+            try:
+                status, payload = channel.get_nowait()
+            except queue.Empty:
+                self.after(100, poll)
+                return
+            if status == "error":
+                self._show_preview_message(f"Unable to preview source\n{payload}")
+                return
+            self._source_exact_mesh = payload.get("_exactSourcePreview")
+            thumbnail, mesh = payload.get("thumbnail"), payload.get("previewMesh")
+            if mesh and Path(mesh).is_file():
+                self.preview_meshes["Original"] = str(mesh)
+                if self.preview_mode.get() in ("Original", "Wireframe"):
+                    self._show_preview_mode()
+            elif thumbnail:
+                self._show_source_thumbnail(thumbnail)
+            else:
+                self._show_preview_message("Source loaded\nNo preview geometry available")
+
+        self.after(100, poll)
+        threading.Thread(target=worker, daemon=True, name="SourceMeshPreview").start()
 
     def _show_source_thumbnail(self, path):
         if not path or not Path(path).is_file():
@@ -613,7 +1074,7 @@ class StudioApp(tk.Tk):
             width = max(420, self.preview_canvas.winfo_width() - 24)
             image.thumbnail((width, 276), Image.Resampling.LANCZOS)
             self.source_preview_photo = ImageTk.PhotoImage(image)
-            self.preview_canvas.delete("all")
+            self.preview_canvas.clear_mesh()
             self.preview_canvas.create_image(
                 max(210, self.preview_canvas.winfo_width() / 2),
                 150,
@@ -626,7 +1087,7 @@ class StudioApp(tk.Tk):
 
     def _show_preview_message(self, message):
         self.source_preview_photo = None
-        self.preview_canvas.delete("all")
+        self.preview_canvas.clear_mesh()
         self.preview_canvas.create_text(
             max(210, self.preview_canvas.winfo_width() / 2), 150,
             text=message, fill="#768187", font=("Segoe UI", 12), justify="center",
@@ -650,6 +1111,71 @@ class StudioApp(tk.Tk):
         if path:
             self.texture.set(path)
 
+    def _refresh_slicer_compatibility_warning(self, *_):
+        path = self.native_project_template.get().strip()
+        message = ""
+        if path:
+            try:
+                details = inspect_template(path)
+                message = orca_h2c_warning(details, self.output_application.get())
+            except (OSError, ValueError, TemplateError):
+                pass  # Invalid templates already have their own visible status.
+        self.slicer_compatibility_status.set(message)
+
+    def _refresh_native_template_status(self):
+        self._refresh_slicer_compatibility_warning()
+        value=self.native_project_template.get().strip()
+        if not value:
+            self.native_template_status.set("No template selected (required to compose generic colored 3MF)")
+            return
+        try:
+            info=inspect_template(value)
+        except (TemplateError, OSError, ValueError) as exc:
+            self.native_template_status.set(f"Invalid template: {exc}")
+            return
+        self.native_template_status.set(
+            f"{info['slicer']} {info['slicerVersion']} | {info['printerPreset']} | "
+            f"{info['nozzle']} mm | {info['processPreset']}"
+        )
+
+    def choose_native_template(self):
+        name=filedialog.askopenfilename(
+            parent=self, title="Choose a blank native Bambu/Orca 3MF project",
+            filetypes=[("Native slicer projects", "*.3mf")],
+        )
+        if not name:
+            return
+        try:
+            info=inspect_template(name)
+        except (TemplateError, OSError, ValueError) as exc:
+            messagebox.showerror("Invalid native template", str(exc), parent=self)
+            return
+        self.native_project_template.set(info['path'])
+        self._refresh_native_template_status()
+        self.status.set("Native slicer template selected; Save Settings to remember it.")
+
+    def clear_native_template(self):
+        self.native_project_template.set("")
+        self._refresh_native_template_status()
+
+    def show_native_template_help(self):
+        messagebox.showinfo(
+            "About native project templates",
+            "A template is an EMPTY .3mf project saved using Bambu Studio or OrcaSlicer.\n\n"
+            "To create one:\n"
+            "1. Select your printer, nozzle, build plate, and process settings in your slicer.\n"
+            "2. Remove every model from the plate.\n"
+            "3. Save the empty project as a .3mf.\n"
+            "4. Select it here and use Compose Palette.\n\n"
+            "FullSpectrum combines the imported mesh and computed mixed-filament recipes "
+            "with the template's native printer and process settings. "
+            "It never overwrites the original template.\n\n"
+            "A separate filament JSON library still controls the colors you can plan with. "
+            "Review printer/nozzle/material settings and mixed recipes in the slicer before printing. "
+            "This feature currently applies to generic colored 3MF, OBJ, and GLB imports.",
+            parent=self,
+        )
+
     def choose_custom(self):
         path = filedialog.askopenfilename(filetypes=[("JSON filament library", "*.json")])
         if path:
@@ -671,7 +1197,7 @@ class StudioApp(tk.Tk):
         source = Path(self.project.get())
         if not source.is_file() or source.suffix.lower() not in (".3mf", ".obj", ".glb"):
             if not automatic:
-                messagebox.showerror("FullSpectrum Studio", "Choose a painted Bambu .3mf or textured OBJ / GLB source first.")
+                messagebox.showerror("FullSpectrum Studio", "Choose a colored .3mf or textured OBJ / GLB source first.")
             return
         if self.source.get() == "custom" and not Path(self.custom.get()).is_file():
             if not automatic:
@@ -703,15 +1229,20 @@ class StudioApp(tk.Tk):
             "planner_mode": self.planner_mode.get(),
             "planning_sample": self.planning_sample.get(),
             "real_slots": self.real_slots.get(),
+            "max_output_colors": self.max_output_colors.get(),
             "quality_bias": "auto" if self.smart_quality.get() else self.quality_bias.get(),
             "mix_model": self.mix_model.get(),
             "reference": self.reference.get() or None,
             "texture": self.texture.get() or None,
             "custom": self.custom.get() or None,
+            "native_project_template": self.native_project_template.get().strip() or None,
             "auto_open": self.auto_open.get(),
             "output_application": self.output_application.get(),
             "allowed_anchor_keys": sorted(option_keys - disabled_keys) if disabled_keys else None,
             "pinned_anchor_keys": sorted(self.pinned_anchor_keys & option_keys),
+            "analysis_dir": str(Path(tempfile.gettempdir()) / "FullSpectrumStudio" /
+                                "windows-forecast" / str(os.getpid())),
+            "solid_color_overrides": dict(self.solid_color_overrides),
         }
         threading.Thread(
             target=self._run_operation,
@@ -734,8 +1265,10 @@ class StudioApp(tk.Tk):
                 output_dir=source.parent,
                 reveal=False,
                 real_slots=options["real_slots"],
+                max_output_colors=options["max_output_colors"],
                 reference=options["reference"],
                 custom_catalog_path=options["custom"],
+                native_template_path=options["native_project_template"],
                 texture_override=options["texture"],
                 quality_bias=options["quality_bias"],
                 catalog_region=options["catalog_region"],
@@ -745,6 +1278,8 @@ class StudioApp(tk.Tk):
                 plan_only=plan_only,
                 allowed_anchor_keys=options["allowed_anchor_keys"],
                 pinned_anchor_keys=options["pinned_anchor_keys"],
+                solid_color_overrides=options["solid_color_overrides"],
+                analysis_dir=options["analysis_dir"],
                 progress=report,
             )
             if plan_only:
@@ -769,7 +1304,7 @@ class StudioApp(tk.Tk):
             self.last_output = result["output"]
             self.after(0, lambda: self.finish(result, "\n".join(text)))
             if options["auto_open"]:
-                self.open_validated_output(result["output"], options["output_application"])
+                self.after(0, self.open_validated_output, result["output"], options["output_application"])
         
         except Exception as error:
             details = "".join(traceback.format_exception(type(error), error, error.__traceback__))
@@ -925,28 +1460,122 @@ class StudioApp(tk.Tk):
         else:
             subprocess.run(["open", "-R", output])
 
+    def _current_slicer_executable_key(self):
+        return ("bambu_studio_executable" if self.output_application.get() == "Bambu Studio"
+                else "orcaslicer_executable")
+
+    def _refresh_slicer_target_label(self, *_):
+        selection = self.slicer_executable_paths.get(self._current_slicer_executable_key(), "")
+        if selection:
+            self.slicer_target_label.set(f"Selected: {Path(selection).name} (custom path)")
+        else:
+            self.slicer_target_label.set("Automatic executable detection")
+
+    def choose_slicer_executable(self):
+        """Pick a specific installed, standalone or nightly build for this slicer."""
+        if os.name != "nt":
+            messagebox.showinfo("Slicer selection", "Custom executable selection is currently available on Windows.", parent=self)
+            return
+        application = self.output_application.get()
+        if application not in ("Bambu Studio", "OrcaSlicer"):
+            return
+        filename = filedialog.askopenfilename(
+            parent=self, title=f"Choose {application} executable (nightly / portable supported)",
+            filetypes=[("Windows executables", "*.exe"), ("All files", "*.*")],
+        )
+        if not filename:
+            return
+        candidate = Path(filename).expanduser()
+        if not candidate.is_file() or candidate.suffix.lower() != ".exe":
+            messagebox.showerror("Invalid slicer executable", "Select an existing .exe file.", parent=self)
+            return
+        self.slicer_executable_paths[self._current_slicer_executable_key()] = str(candidate.resolve())
+        self._refresh_slicer_target_label()
+        self.status.set(f"Using custom {application} executable. Click Save Settings to remember this version.")
+
+    def reset_slicer_executable(self):
+        """Return this application to automatic installed-slicer lookup."""
+        self.slicer_executable_paths[self._current_slicer_executable_key()] = ""
+        self._refresh_slicer_target_label()
+        self.status.set("Using automatic slicer discovery. Click Save Settings to remember this choice.")
+
     def open_validated_output(self, output, application):
-        if application != "OrcaSlicer":
-            os.startfile(output) if os.name == "nt" else subprocess.run(["open", output])
+        """Open the validated 3MF in the chosen slicer, not the OS default viewer."""
+        output = str(Path(output).expanduser().resolve())
+        if application not in ("Bambu Studio", "OrcaSlicer"):
+            messagebox.showerror("Unknown slicer", f"Unsupported output application: {application}")
             return
+
         if os.name == "nt":
-            possible = [
-                Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "OrcaSlicer" / "orca-slicer.exe",
-                Path(os.environ.get("ProgramFiles", "")) / "OrcaSlicer" / "orca-slicer.exe",
-                Path(os.environ.get("ProgramFiles", "")) / "OrcaSlicer" / "OrcaSlicer.exe",
-            ]
-            executable = next((str(path) for path in possible if path.is_file()), None) or shutil.which("orca-slicer")
-            if executable:
-                subprocess.Popen([executable, output])
-                return
-        elif shutil.which("open") and subprocess.run(["open", "-Ra", "OrcaSlicer"]).returncode == 0:
-            subprocess.Popen(["open", "-a", "OrcaSlicer", output])
+            key = ("bambu_studio_executable" if application == "Bambu Studio"
+                   else "orcaslicer_executable")
+            configured = self.slicer_executable_paths.get(key, "")
+            if configured:
+                executable = Path(configured)
+                if not executable.is_file():
+                    messagebox.showwarning(
+                        "Selected slicer unavailable",
+                        f"The selected executable no longer exists:\n{configured}\nChoose a replacement executable.",
+                        parent=self,
+                    )
+                    self.choose_slicer_executable()
+                    configured = self.slicer_executable_paths.get(key, "")
+                    executable = Path(configured) if configured else None
+                    if executable is None or not executable.is_file():
+                        return
+            else:
+                executable = find_windows_slicer(application)
+            if executable is None:
+                # Portable or custom-location installations are common. This
+                # dialog must run on Tk's main thread, not the conversion worker.
+                selected = filedialog.askopenfilename(
+                    parent=self,
+                    title=f"Locate {application} executable",
+                    filetypes=[("Windows applications", "*.exe"), ("All files", "*.*")],
+                )
+                if not selected:
+                    messagebox.showwarning(
+                        f"{application} not found",
+                        "The output 3MF was saved successfully, but the selected slicer "
+                        "could not be located. You can open the file from the slicer manually.",
+                        parent=self,
+                    )
+                    return
+                executable = Path(selected)
+                if not executable.is_file():
+                    messagebox.showerror("Invalid slicer path", "The selected executable does not exist.", parent=self)
+                    return
+            try:
+                subprocess.Popen([str(executable), output], cwd=str(executable.parent))
+            except OSError as error:
+                messagebox.showerror(
+                    f"Could not open {application}",
+                    f"The 3MF was saved, but the slicer could not be launched:\n{error}",
+                    parent=self,
+                )
             return
-        self.after(0, lambda: messagebox.showwarning(
-            "OrcaSlicer not found",
-            "The validated output was saved, but OrcaSlicer was not found. Install OrcaSlicer or open the .3mf manually."
-        ))
+
+        # On macOS, force the chosen application instead of the default viewer.
+        app_names = ("BambuStudio", "Bambu Studio") if application == "Bambu Studio" else ("OrcaSlicer", "Orca Slicer")
+        for app_name in app_names:
+            lookup = subprocess.run(["open", "-Ra", app_name], capture_output=True)
+            if lookup.returncode == 0:
+                try:
+                    subprocess.Popen(["open", "-a", app_name, output])
+                except OSError as error:
+                    messagebox.showerror(f"Could not open {application}", str(error), parent=self)
+                return
+        messagebox.showwarning(
+            f"{application} not found",
+            "The output 3MF was saved successfully, but the selected slicer "
+            "could not be found. Open the file manually in your slicer.",
+            parent=self,
+        )
 
 
 if __name__ == "__main__":
     StudioApp().mainloop()
+
+# Native output-colors/thumbnail patch v1
+
+# Palette and Orca H2C warning patch v2
