@@ -1,20 +1,18 @@
-"""Stage 2A PySide6 plan settings — intentionally not a converter or model viewer.
+"""FullSpectrum Studio Qt frontend with Stage 3B source-color preview.
 
-No optimizer imports or conversion calls. Settings are saved only when requested.
-Native template inspection reads metadata but never modifies the source 3MF.
-Existing Tkinter desktop remains the production interface throughout migration.
+Rendering and file selection are read-only. Conversion remains in Tkinter.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import QAction, QColor, QLinearGradient, QPainter, QPen, QKeySequence
+from PySide6.QtCore import Qt, QEvent, QTimer
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter, QTabWidget,
+    QPushButton, QScrollArea, QSlider, QSplitter, QTabWidget,
     QLineEdit, QCheckBox, QToolButton, QMessageBox, QFormLayout,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QGridLayout, QWidget, QSizePolicy,
 )
 
 from desktop.app_support import APP_VERSION
@@ -24,6 +22,9 @@ from desktop.qt_app.plan_preferences import (
     OUTPUT_SLICERS,
 )
 from desktop.qt_app.filaments_tab import FilamentsTab
+from desktop.qt_app.gl_viewport import ModelViewport
+from desktop.qt_app.preview_worker import ModelLoadWorker
+from desktop.qt_app.source_palette import PaletteSwatch, responsive_columns
 from desktop.qt_app.results_tab import ResultsTab
 from desktop.qt_app.shell_state import (
     ShellState, display_filename, MODEL_FILE_FILTER, REFERENCE_FILE_FILTER,
@@ -55,56 +56,18 @@ def _disabled(widget, reason):
     return widget
 
 
-class PreviewPlaceholder(QFrame):
-    """Noninteractive perspective grid; actual 3D rendering arrives in Stage 3."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("viewport")
-        self.setMinimumHeight(260)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.addStretch(4)
-        title = _label("3D Preview", "metric")
-        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(title)
-        info = _label("Model rendering will be connected in Stage 3.", "bodyMuted")
-        info.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(info)
-        layout.addStretch(5)
-        self._note = _label("Drag-to-orbit, zoom, and paint overlays are not active yet.", "helpText")
-        layout.addWidget(self._note)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        # Decorative background: never misrepresents the loaded 3MF or analysis.
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        floor = h * 0.43
-        fade = QLinearGradient(0, floor, 0, h)
-        fade.setColorAt(0, QColor(25, 36, 43, 42))
-        fade.setColorAt(1, QColor(30, 52, 63, 150))
-        p.fillRect(QRectF(1, floor, max(0, w - 2), h - floor - 1), fade)
-        pen = QPen(QColor(67, 94, 105, 80), 1)
-        p.setPen(pen)
-        vanishing = QPointF(w * 0.5, floor)
-        for i in range(-9, 10):
-            p.drawLine(vanishing, QPointF(w * (0.5 + i * .25), h))
-        for row in range(1, 11):
-            # Quadratic spacing suggests depth without a fake displayed mesh.
-            y = floor + (h - floor) * (row / 10) ** 2
-            p.drawLine(QPointF(0, y), QPointF(w, y))
-        p.end()
-
-
 class MainWindow(QMainWindow):
     """Mac-inspired workspace shell with functioning file selection and navigation."""
 
     def __init__(self, settings_path=None):
         super().__init__()
         self.state = ShellState()
+        self._preview_serial = 0
+        self._preview_threads = []
+        self._original_mesh = None
+        self._predicted_mesh = None
+        self._predicted_serial = 0
+        self._predicted_filename = ""
         self.plan_preferences = PlanPreferences(settings_path)
         self._loading_plan_ui = False
         self.setObjectName("qtMainWindow")
@@ -114,7 +77,7 @@ class MainWindow(QMainWindow):
         self._build()
         self._build_menus()
         self.statusBar().showMessage(
-            "Qt Stage 2C — Results and activity are available; conversion remains in the Tkinter application."
+            "Qt Stage 3B — original source colors, improved shading, and optional saved predicted OBJ; live forecasting and conversion remain in Stage 4."
         )
 
     def _build(self):
@@ -139,7 +102,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 2C", "badge"))
+        h.addWidget(_label("UI prototype · Stage 3B", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -179,17 +142,87 @@ class MainWindow(QMainWindow):
         row.addStretch()
         self.preview_mode = QComboBox()
         self.preview_mode.addItems(["Original", "Predicted", "Color Loss", "Wireframe"])
-        self.preview_mode.setCurrentText("Predicted")
-        _disabled(self.preview_mode, "Live 3D model preview arrives in Stage 3.")
+        self.preview_mode.setCurrentText("Original")
         self.preview_mode.setObjectName("previewMode")
+        self.preview_mode.setEnabled(False)
+        self.preview_mode.setToolTip("Original source colors, saved predicted OBJ (when loaded), or wireframe. Live prediction is not run in Qt yet.")
+        self.preview_mode.currentTextChanged.connect(self._preview_mode_changed)
         row.addWidget(self.preview_mode)
+        self.load_predicted_button = QPushButton('Load Predicted…')
+        self.load_predicted_button.setObjectName('loadPredictedButton')
+        self.load_predicted_button.setToolTip('Load an existing FullSpectrum predicted .obj with its matching .mtl. Does not run a conversion.')
+        self.load_predicted_button.setEnabled(False)
+        self.load_predicted_button.clicked.connect(self._open_predicted)
+        row.addWidget(self.load_predicted_button)
+        self.reset_camera_button = QPushButton("Reset View")
+        self.reset_camera_button.setObjectName("resetCameraButton")
+        self.reset_camera_button.setEnabled(False)
+        self.reset_camera_button.clicked.connect(self._reset_camera)
+        row.addWidget(self.reset_camera_button)
         content.addLayout(row)
-        self.preview_surface = PreviewPlaceholder()
-        content.addWidget(self.preview_surface, stretch=1)
-        content.addWidget(_section_heading("Source Palette"))
-        self.source_palette_message = _label("No source palette loaded. Source inspection will be connected in Stage 3.", "bodyMuted", wrap=True)
-        content.addWidget(self.source_palette_message)
-        content.addSpacing(8)
+        # A vertical splitter makes palette inspection adjustable without taking
+        # permanent space from the model. Both panes remain real Qt widgets.
+        self.preview_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.preview_splitter.setObjectName('previewPaletteSplitter')
+        self.preview_splitter.setChildrenCollapsible(False)
+        self.preview_splitter.setHandleWidth(7)
+        model_area = QWidget()
+        model_layout = QVBoxLayout(model_area)
+        model_layout.setContentsMargins(0,0,0,0)
+        model_layout.setSpacing(6)
+        model_area.setMinimumHeight(195)
+        self.preview_surface = ModelViewport()
+        self.preview_surface.render_error.connect(self._preview_render_error)
+        model_layout.addWidget(self.preview_surface, stretch=1)
+        self.preview_status = _label("Open a 3MF, OBJ or GLB model to view its geometry.", "helpText", wrap=True)
+        model_layout.addWidget(self.preview_status)
+        self.preview_splitter.addWidget(model_area)
+
+        palette_area = QFrame()
+        palette_area.setObjectName('sourcePalettePanel')
+        palette_area.setMinimumHeight(94)
+        palette_layout = QVBoxLayout(palette_area)
+        palette_layout.setContentsMargins(0, 4, 0, 0)
+        palette_layout.setSpacing(5)
+        title_row = QHBoxLayout()
+        title_row.addWidget(_section_heading("Source Palette"))
+        title_row.addStretch()
+        self.palette_help = _label('Drag divider to resize', 'helpText')
+        title_row.addWidget(self.palette_help)
+        palette_layout.addLayout(title_row)
+        self.source_palette_message = _label(
+            'Open a model to inspect its exact source color assignments.', 'bodyMuted', wrap=True)
+        palette_layout.addWidget(self.source_palette_message)
+        self.source_palette_detail = _label('Hover over or click a swatch for HEX and face count.', 'helpText')
+        self.source_palette_detail.setObjectName('sourcePaletteDetail')
+        palette_layout.addWidget(self.source_palette_detail)
+        self.source_palette_scroll = QScrollArea()
+        self.source_palette_scroll.setObjectName('sourcePaletteScroll')
+        self.source_palette_scroll.setWidgetResizable(True)
+        self.source_palette_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.source_palette_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.source_palette_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.source_palette_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.source_palette_content = QWidget()
+        self.source_palette_content.setObjectName('sourcePaletteContent')
+        self.source_palette_layout = QGridLayout(self.source_palette_content)
+        self.source_palette_layout.setContentsMargins(0, 0, 6, 2)
+        self.source_palette_layout.setHorizontalSpacing(5)
+        self.source_palette_layout.setVerticalSpacing(5)
+        self.source_palette_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.source_palette_scroll.setWidget(self.source_palette_content)
+        self._source_palette_cells = []
+        self._source_palette_columns = 0
+        self._source_palette_selected = None
+        self._source_palette_counts = {}
+        self.source_palette_scroll.viewport().installEventFilter(self)
+        self.source_palette_scroll.setVisible(False)
+        palette_layout.addWidget(self.source_palette_scroll, stretch=1)
+        self.preview_splitter.addWidget(palette_area)
+        self.preview_splitter.setStretchFactor(0, 7)
+        self.preview_splitter.setStretchFactor(1, 2)
+        self.preview_splitter.setSizes([590, 135])
+        content.addWidget(self.preview_splitter, stretch=1)
         return pane
 
     def _sidebar(self):
@@ -707,7 +740,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Let any 3MF/inventory reads finish so Qt never destroys a live QThread.
-        for worker in list(self.filaments_panel._workers):
+        for worker in list(self.filaments_panel._workers) + list(self._preview_threads):
             if worker.isRunning():
                 worker.wait()
         super().closeEvent(event)
@@ -719,10 +752,11 @@ class MainWindow(QMainWindow):
         name = display_filename(path)
         self.project_subtitle.setText(name)
         self.filaments_panel.set_model(path)
-        self.bottom_hint.setText(f"Selected: {name} — the model has not been imported or rendered.")
-        self.statusBar().showMessage("Model path selected. Source loading arrives in Stage 3.")
-        self.results_panel.record_event('Model selected', f'{name} selected; not yet imported or rendered.', 'info')
+        self.bottom_hint.setText(f"Selected: {name} — loading preview geometry (original files are unchanged).")
+        self.statusBar().showMessage("Loading 3D model geometry…")
+        self.results_panel.record_event('Model selected', f'{name} selected; loading preview geometry.', 'busy')
         self._refresh_results_context()
+        self._load_preview(path)
 
     def _open_reference(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open Visual Reference", "", REFERENCE_FILE_FILTER)
@@ -733,3 +767,207 @@ class MainWindow(QMainWindow):
         )
         self.results_panel.record_event('Reference selected',
                                         display_filename(path) + ' selected; not processed yet.', 'info')
+
+    def _load_preview(self, path):
+        self._preview_serial += 1
+        self._predicted_serial += 1  # obsolete predicted loads must not replace a different model
+        self._original_mesh = None
+        self._predicted_mesh = None
+        self._predicted_filename = ''
+        self.load_predicted_button.setEnabled(False)
+        self.source_palette_scroll.setVisible(False)
+        self.source_palette_message.setText('Reading source color assignments…')
+        serial = self._preview_serial
+        self.preview_surface.clear_mesh()
+        self.preview_mode.setEnabled(False)
+        self.reset_camera_button.setEnabled(False)
+        self.preview_status.setText("Reading model geometry…")
+        task = ModelLoadWorker(path, self)
+        self._preview_threads.append(task)
+        task.completed.connect(
+            lambda mesh, error, filename, s=serial: self._preview_loaded(s, filename, mesh, error))
+        task.finished.connect(lambda t=task: self._release_preview_task(t))
+        task.start()
+
+    def _release_preview_task(self, task):
+        if task in self._preview_threads:
+            self._preview_threads.remove(task)
+        task.deleteLater()
+
+    def _preview_loaded(self, serial, path, mesh, error):
+        if serial != self._preview_serial or path != self.state.model_path:
+            return  # Ignore obsolete loads when a user selects a different file.
+        if error:
+            self.preview_status.setText("Preview unavailable: " + error)
+            self.bottom_hint.setText("Source selection retained; preview could not be loaded.")
+            self.statusBar().showMessage("Model preview unavailable.")
+            self.results_panel.record_event('Model preview', error, 'warning')
+            return
+        self._original_mesh = mesh
+        self.preview_surface.set_mesh(mesh)
+        self.reset_camera_button.setEnabled(True)
+        self.preview_mode.setEnabled(True)
+        # Stage 3A does not display predicted colors or error maps.
+        for index in range(self.preview_mode.count()):
+            label = self.preview_mode.itemText(index)
+            if label not in ('Original', 'Wireframe'):
+                # Items remain visible but unavailable, avoiding a fake preview.
+                item = self.preview_mode.model().item(index)
+                if item is not None:
+                    item.setEnabled(False)
+        self.preview_mode.setCurrentText('Original')
+        self.preview_surface.set_wireframe(False)
+        self.load_predicted_button.setEnabled(True)
+        self._populate_source_palette(mesh)
+        suffix = ' · sampled display only' if mesh.sampled else ''
+        info = f"{len(mesh.triangles):,} visible triangles / {mesh.source_triangles:,} source triangles{suffix}"
+        self.preview_status.setText(info + ' · Left drag orbit · Right drag pan · Wheel zoom · R reset')
+        self.bottom_hint.setText('Original 3D colors loaded where available. Saved predicted OBJ can be previewed; live prediction and export arrive in Stage 4.')
+        self.statusBar().showMessage('3D preview ready: ' + info)
+        self.results_panel.record_event('Model preview', info, 'success')
+
+    def _preview_render_error(self, message):
+        self.preview_status.setText(message)
+        self.statusBar().showMessage('OpenGL renderer unavailable.')
+        self.results_panel.record_event('3D renderer', message, 'warning')
+
+    def eventFilter(self, watched, event):
+        if (hasattr(self, 'source_palette_scroll') and
+            watched is self.source_palette_scroll.viewport() and
+            event.type() == QEvent.Type.Resize and
+            getattr(self, '_source_palette_cells', None)):
+            # Prefer the event's new width: Qt may still report the old geometry
+            # inside an active resize/layout pass.
+            self._reflow_source_palette(event.size().width())
+        return super().eventFilter(watched, event)
+
+    def _reflow_source_palette(self, viewport_width=None):
+        cells = getattr(self, '_source_palette_cells', [])
+        if not cells:
+            return
+        if viewport_width is None:
+            viewport_width = self.source_palette_scroll.viewport().width()
+        columns = responsive_columns(viewport_width, len(cells))
+        grid = self.source_palette_layout
+        if columns != self._source_palette_columns:
+            old_cols = self._source_palette_columns
+            while grid.count():
+                grid.takeAt(0)
+            for col in range(max(old_cols, columns)):
+                grid.setColumnStretch(col, 1 if col < columns else 0)
+                grid.setColumnMinimumWidth(col, 0)
+            for i, cell in enumerate(cells):
+                grid.addWidget(cell, i // columns, i % columns)
+            self._source_palette_columns = columns
+        # No fixed height: the user can drag the vertical splitter and the
+        # palette uses its own scrollbar only when its rows exceed that height.
+
+    def _on_palette_hover(self, color):
+        if color in self._source_palette_counts:
+            count = self._source_palette_counts[color]
+            total = sum(self._source_palette_counts.values())
+            fraction = 100 * count / total if total else 0
+            self.source_palette_detail.setText(
+                f'{color}  ·  {count:,} faces  ·  {fraction:.1f}% of colored faces')
+
+    def _on_palette_leave(self):
+        if self._source_palette_selected:
+            self._on_palette_hover(self._source_palette_selected)
+        else:
+            self.source_palette_detail.setText('Hover over or click a swatch for HEX and face count.')
+
+    def _select_palette_color(self, color):
+        self._source_palette_selected = color
+        for swatch in self._source_palette_cells:
+            swatch.set_selected(swatch.hex_color == color)
+        self._on_palette_hover(color)
+
+    def _populate_source_palette(self, mesh):
+        grid = self.source_palette_layout
+        while grid.count():
+            old_item = grid.takeAt(0)
+            if old_item.widget() is not None:
+                old_item.widget().deleteLater()
+        self._source_palette_cells = []
+        self._source_palette_columns = 0
+        self._source_palette_selected = None
+        palette = tuple(getattr(mesh, 'palette_counts', ()))
+        self._source_palette_counts = dict(palette)
+        colors = len(palette)
+        faces = sum(count for _, count in palette)
+        if palette:
+            self.source_palette_message.setText(
+                f'{colors:,} source colors · {faces:,} colored faces')
+        else:
+            self.source_palette_message.setText(
+                getattr(mesh, 'color_status', 'No source colors available'))
+        self._on_palette_leave()
+        for color, count in palette:
+            chip = PaletteSwatch(color, count)
+            chip.hovered.connect(self._on_palette_hover)
+            chip.left.connect(self._on_palette_leave)
+            chip.chosen.connect(self._select_palette_color)
+            self._source_palette_cells.append(chip)
+        self.source_palette_scroll.setVisible(bool(palette))
+        if palette:
+            self._reflow_source_palette()
+            # Recalculate after show/layout activation so first render uses the
+            # real splitter width, not QScrollArea's pre-layout size hint.
+            QTimer.singleShot(0, self._reflow_source_palette)
+
+    def _open_predicted(self):
+        if self._original_mesh is None:return
+        path,_=QFileDialog.getOpenFileName(self,'Open Existing Predicted Preview (OBJ)', '', 'Wavefront OBJ (*.obj)')
+        if not path:return
+        self._predicted_serial+=1
+        serial=self._predicted_serial
+        source=self.state.model_path
+        self.load_predicted_button.setEnabled(False)
+        self.statusBar().showMessage('Reading saved predicted OBJ and matching MTL…')
+        thread=ModelLoadWorker(path,self)
+        self._preview_threads.append(thread)
+        thread.completed.connect(lambda mesh,error,filename,s=serial,src=source:
+                                 self._predicted_loaded(s,src,filename,mesh,error))
+        thread.finished.connect(lambda t=thread:self._release_preview_task(t))
+        thread.start()
+
+    def _predicted_loaded(self,serial,source,path,mesh,error):
+        if serial!=self._predicted_serial or source!=self.state.model_path:return
+        self.load_predicted_button.setEnabled(True)
+        if error:
+            self.results_panel.record_event('Saved predicted preview',error,'warning')
+            self.statusBar().showMessage('Unable to load saved predicted OBJ: '+error)
+            return
+        if not getattr(mesh,'palette_counts',()):
+            self.statusBar().showMessage('Predicted OBJ has no MTL diffuse colors; preview was not activated.')
+            self.results_panel.record_event('Saved predicted preview', 'OBJ lacks diffuse MTL swatches; color preview not activated.','warning')
+            return
+        self._predicted_mesh = mesh
+        self._predicted_filename = path
+        for i in range(self.preview_mode.count()):
+            if self.preview_mode.itemText(i)=='Predicted':
+                item=self.preview_mode.model().item(i)
+                if item:item.setEnabled(True)
+        self.preview_mode.setCurrentText('Predicted')
+        self.results_panel.record_event('Saved predicted preview',display_filename(path)+' opened (no conversion run).','success')
+        self.statusBar().showMessage('Showing saved predicted colors from '+display_filename(path))
+
+    def _preview_mode_changed(self, name):
+        if name == 'Predicted' and self._predicted_mesh is not None:
+            self.preview_surface.set_mesh(self._predicted_mesh)
+            self.preview_surface.set_wireframe(False)
+            self.preview_status.setText('Saved predicted OBJ · '+display_filename(self._predicted_filename)+' · Not a live Qt forecast')
+        elif name in ('Original','Wireframe'):
+            if self._original_mesh is not None and self.preview_surface.mesh is not self._original_mesh:
+                self.preview_surface.set_mesh(self._original_mesh)
+            self.preview_surface.set_wireframe(name=='Wireframe')
+            if self._original_mesh is not None:
+                mesh=self._original_mesh
+                suffix=' · sampled display' if mesh.sampled else ''
+                self.preview_status.setText(f'{len(mesh.triangles):,} visible / {mesh.source_triangles:,} source triangles{suffix} · {name}')
+        elif self.preview_mode.currentText()!='Original':
+            self.preview_mode.setCurrentText('Original')
+
+    def _reset_camera(self):
+        self.preview_surface.reset_camera()
+        self.statusBar().showMessage('3D camera reset.')

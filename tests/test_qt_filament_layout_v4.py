@@ -25,10 +25,10 @@ class SourceTests(unittest.TestCase):
 
     def test_tables_scroll_independently(self):
         code = TARGET.read_text(encoding='utf-8')
-        self.assertIn('self.filaments.setFixedHeight(230)', code)
-        self.assertIn('self.solid_table.setFixedHeight(178)', code)
-        self.assertNotIn('lay.addWidget(self.filaments, 2)', code)
-        self.assertNotIn('lay.addWidget(self.solid_table, 1)', code)
+        self.assertIn('self.filaments.setMinimumHeight(230)', code)
+        self.assertIn('self.solid_table.setMinimumHeight(178)', code)
+        self.assertIn('lay.addWidget(self.filaments, 3)', code)
+        self.assertIn('lay.addWidget(self.solid_table, 2)', code)
 
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'PySide6 not installed')
@@ -60,6 +60,12 @@ class QtGeometryTests(unittest.TestCase):
         solid_end = self.tab.solid_table.mapTo(self.tab.content, QPoint(0, self.tab.solid_table.height())).y()
         assign_start = self.tab.target.mapTo(self.tab.content, QPoint(0, 0)).y()
         self.assertGreaterEqual(assign_start, solid_end)
+
+    def test_taller_window_expands_both_tables(self):
+        self.tab.resize(470, 1350)
+        self.app.processEvents()
+        self.assertGreater(self.tab.filaments.height(), 230)
+        self.assertGreater(self.tab.solid_table.height(), 178)
 
     def test_many_colors_scroll_inside_table(self):
         self.tab.options = [dict(key=f'key-{i}',name=f'Filament {i}',series='PLA',

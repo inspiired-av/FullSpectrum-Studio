@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLayout,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTableWidget,
+    QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -140,10 +140,11 @@ class FilamentsTab(QWidget):
         self.filaments.setColumnWidth(0, 46)
         self.filaments.setColumnWidth(1, 54)
         self.filaments.setColumnWidth(3, 47)
-        # Use independent row scrolling instead of a table that stretches
-        # beyond the space available in shorter Windows application windows.
-        self.filaments.setFixedHeight(230)
-        lay.addWidget(self.filaments)
+        # The page scrolls in short windows. In tall windows, tables receive
+        # spare vertical space instead of leaving a dead region below them.
+        self.filaments.setMinimumHeight(230)
+        self.filaments.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        lay.addWidget(self.filaments, 3)
         bulk = QHBoxLayout()
         self.enable_all = QPushButton('Enable All')
         self.enable_all.clicked.connect(self._enable_all)
@@ -187,9 +188,10 @@ class FilamentsTab(QWidget):
         self.solid_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch)
         self.solid_table.setColumnWidth(0,115)
         self.solid_table.setColumnWidth(1,65)
-        self.solid_table.setFixedHeight(178)
+        self.solid_table.setMinimumHeight(178)
+        self.solid_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.solid_table.itemSelectionChanged.connect(self._selection_changed)
-        lay.addWidget(self.solid_table)
+        lay.addWidget(self.solid_table, 2)
         self.target = QComboBox()
         self.target.setMinimumWidth(100)
         lay.addWidget(self.target)
@@ -203,7 +205,6 @@ class FilamentsTab(QWidget):
         lay.addLayout(assign_row)
         lay.addWidget(_text('Model highlighting will be connected in Stage 3. '
                             'Protected colors will be passed to the engine in Stage 4.', 'helpText'))
-        lay.addStretch(1)
         self._update_actions()
 
     def _source_settings(self):
