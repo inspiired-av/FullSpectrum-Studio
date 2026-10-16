@@ -41,6 +41,7 @@ from direct_source_palette import (load_exact_color_targets, mapped_source_paint
 from global_recipe_optimizer import optimize_direct_palette
 from palette_budget_optimizer import allocate_palette, normalize_output_color_strategy
 from native_project_template import inspect_template, graft_native_project
+from phase4_material_profiles import audit_material_profiles, warning_lines
 from solid_color_overrides import (normalize_solid_overrides, require_protected_slots,
                                    solid_anchor_choice)
 
@@ -3991,6 +3992,16 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                 with zipfile.ZipFile(native_staged) as native_archive:
                     native_settings=json.loads(native_archive.read('Metadata/project_settings.config'))
                 native_layouts=filament_array_layouts(native_settings,newn)
+                # Phase 4: compare real physical-material presets, not just HEX swatches.
+                # Do not edit slicer profile parameters based on a color-library name.
+                material_audit=audit_material_profiles(
+                    native_settings,
+                    [{'slot':i+1, 'name':anchor_name(anchor),
+                      'color':anchor_color(anchor), 'preset':real_profiles[i][0]}
+                     for i,anchor in enumerate(anchors)],
+                    real_count,
+                )
+                warnings.extend(warning_lines(material_audit))
                 validate_output_archive(
                     native_staged,newn,real_count,native_layouts,source_off_diagonal_zeros,
                     preservation=None,expected_paint_counts=expected_counts
