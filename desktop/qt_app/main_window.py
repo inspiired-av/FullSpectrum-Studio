@@ -1,4 +1,4 @@
-"""FullSpectrum Studio Qt frontend with Stage 3B source-color preview.
+"""FullSpectrum Studio Qt frontend with Stage 3C source-color preview.
 
 Rendering and file selection are read-only. Conversion remains in Tkinter.
 """
@@ -77,7 +77,7 @@ class MainWindow(QMainWindow):
         self._build()
         self._build_menus()
         self.statusBar().showMessage(
-            "Qt Stage 3B — original source colors, improved shading, and optional saved predicted OBJ; live forecasting and conversion remain in Stage 4."
+            "Qt Stage 3C — gradient-aware source colors, synchronized selection, and optional protection highlighting; live forecasting and conversion remain in Stage 4."
         )
 
     def _build(self):
@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 3B", "badge"))
+        h.addWidget(_label("UI prototype · Stage 3C", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -173,6 +173,7 @@ class MainWindow(QMainWindow):
         model_area.setMinimumHeight(195)
         self.preview_surface = ModelViewport()
         self.preview_surface.render_error.connect(self._preview_render_error)
+        self.preview_surface.background_clicked.connect(self._clear_palette_selection)
         model_layout.addWidget(self.preview_surface, stretch=1)
         self.preview_status = _label("Open a 3MF, OBJ or GLB model to view its geometry.", "helpText", wrap=True)
         model_layout.addWidget(self.preview_status)
@@ -187,13 +188,32 @@ class MainWindow(QMainWindow):
         title_row = QHBoxLayout()
         title_row.addWidget(_section_heading("Source Palette"))
         title_row.addStretch()
+        self.tint_protected=QCheckBox('Tint Protected')
+        self.tint_protected.setObjectName('tintProtectedToggle')
+        self.tint_protected.setToolTip('Optional teal tint on protected model faces. Off preserves original colors.')
+        self.tint_protected.setChecked(False)
+        self.tint_protected.setEnabled(False)
+        self.tint_protected.toggled.connect(self.preview_surface.set_protected_overlay)
+        title_row.addWidget(self.tint_protected)
+        self.manage_protection_button=QPushButton('Manage…')
+        self.manage_protection_button.setObjectName('manageProtectionShortcut')
+        self.manage_protection_button.setToolTip('Go to Filaments → Protect Solid Colors to assign a physical material.')
+        self.manage_protection_button.clicked.connect(self._show_protection_controls)
+        title_row.addWidget(self.manage_protection_button)
+        self.clear_palette_button=QPushButton('Clear')
+        self.clear_palette_button.setObjectName('clearPaletteSelection')
+        self.clear_palette_button.setToolTip('Clear the selected source color (Esc).')
+        self.clear_palette_button.setEnabled(False)
+        self.clear_palette_button.clicked.connect(self._clear_palette_selection)
+        title_row.addWidget(self.clear_palette_button)
         self.palette_help = _label('Drag divider to resize', 'helpText')
         title_row.addWidget(self.palette_help)
+        self.palette_help.setVisible(False)  # Preserve width for interactive controls.
         palette_layout.addLayout(title_row)
         self.source_palette_message = _label(
             'Open a model to inspect its exact source color assignments.', 'bodyMuted', wrap=True)
         palette_layout.addWidget(self.source_palette_message)
-        self.source_palette_detail = _label('Hover over or click a swatch for HEX and face count.', 'helpText')
+        self.source_palette_detail = _label('Click to select; Ctrl+click for multiple; click again or Esc to clear. Teal dots = protected.', 'helpText')
         self.source_palette_detail.setObjectName('sourcePaletteDetail')
         palette_layout.addWidget(self.source_palette_detail)
         self.source_palette_scroll = QScrollArea()
@@ -214,8 +234,11 @@ class MainWindow(QMainWindow):
         self._source_palette_cells = []
         self._source_palette_columns = 0
         self._source_palette_selected = None
+        self._source_palette_selected_colors = ()
         self._source_palette_counts = {}
+        self._preview_protected_colors=set()
         self.source_palette_scroll.viewport().installEventFilter(self)
+        self.source_palette_content.installEventFilter(self)
         self.source_palette_scroll.setVisible(False)
         palette_layout.addWidget(self.source_palette_scroll, stretch=1)
         self.preview_splitter.addWidget(palette_area)
@@ -251,6 +274,8 @@ class MainWindow(QMainWindow):
         self.results_panel = ResultsTab(self.tabs)
         self.tabs.addTab(self.results_panel, "Results")
         self.filaments_panel.activity_event.connect(self._filament_activity)
+        self.filaments_panel.source_color_selected.connect(self._filament_color_selected)
+        self.filaments_panel.protections_changed.connect(self._protections_updated)
         self._refresh_results_context()
         outer.addWidget(self.tabs)
         return sidebar
@@ -725,6 +750,10 @@ class MainWindow(QMainWindow):
         close.setShortcut(QKeySequence.StandardKey.Quit)
         close.triggered.connect(self.close)
         menu.addAction(close)
+        clear_color=QAction('Clear Source Color Selection', self)
+        clear_color.setShortcut(QKeySequence('Escape'))
+        clear_color.triggered.connect(self._clear_palette_selection)
+        self.addAction(clear_color)
         view = self.menuBar().addMenu("&View")
         for idx, name in enumerate(("Plan", "Filaments", "Results")):
             nav = QAction(name, self)
@@ -776,6 +805,12 @@ class MainWindow(QMainWindow):
         self._predicted_filename = ''
         self.load_predicted_button.setEnabled(False)
         self.source_palette_scroll.setVisible(False)
+        self._source_palette_selected=None
+        self._preview_protected_colors=set()
+        self.clear_palette_button.setEnabled(False)
+        self.tint_protected.setChecked(False)
+        self.tint_protected.setEnabled(False)
+        self.preview_surface.set_highlights(None, ())
         self.source_palette_message.setText('Reading source color assignments…')
         serial = self._preview_serial
         self.preview_surface.clear_mesh()
@@ -805,6 +840,7 @@ class MainWindow(QMainWindow):
             return
         self._original_mesh = mesh
         self.preview_surface.set_mesh(mesh)
+        self._update_preview_highlights()
         self.reset_camera_button.setEnabled(True)
         self.preview_mode.setEnabled(True)
         # Stage 3A does not display predicted colors or error maps.
@@ -839,6 +875,13 @@ class MainWindow(QMainWindow):
             # Prefer the event's new width: Qt may still report the old geometry
             # inside an active resize/layout pass.
             self._reflow_source_palette(event.size().width())
+        if (event.type() == QEvent.Type.MouseButtonPress and
+            watched in (getattr(self, 'source_palette_content', None),
+                        getattr(self.source_palette_scroll, 'viewport', lambda: None)()) and
+            event.button() == Qt.MouseButton.LeftButton):
+            # Only empty background reaches the container; actual swatches
+            # receive their own click events and remain selectable.
+            self._clear_palette_selection()
         return super().eventFilter(watched, event)
 
     def _reflow_source_palette(self, viewport_width=None):
@@ -871,16 +914,93 @@ class MainWindow(QMainWindow):
                 f'{color}  ·  {count:,} faces  ·  {fraction:.1f}% of colored faces')
 
     def _on_palette_leave(self):
-        if self._source_palette_selected:
-            self._on_palette_hover(self._source_palette_selected)
+        if len(self._source_palette_selected_colors) > 1:
+            selected = self._source_palette_selected_colors
+            total = sum(self._source_palette_counts.get(c, 0) for c in selected)
+            self.source_palette_detail.setText(f'{len(selected)} selected colors · {total:,} faces · Ctrl+click to add/remove')
+        elif self._source_palette_selected_colors:
+            self._on_palette_hover(self._source_palette_selected_colors[0])
         else:
-            self.source_palette_detail.setText('Hover over or click a swatch for HEX and face count.')
+            self.source_palette_detail.setText('Click to select; Ctrl+click for multiple; click again or Esc to clear. Teal dots = protected.')
 
-    def _select_palette_color(self, color):
-        self._source_palette_selected = color
+    def _clear_palette_selection(self):
+        self._select_palette_color(None)
+
+    def _toggle_palette_color(self, color):
+        # Plain click replaces the set, or clears an already-sole selection.
+        self._select_palette_color(None if self._source_palette_selected_colors == (color,) else color)
+
+    def _toggle_palette_multi(self, color):
+        selected = list(self._source_palette_selected_colors)
+        if color in selected:
+            selected.remove(color)
+        else:
+            selected.append(color)
+        self._select_palette_colors(selected)
+
+    def _show_protection_controls(self):
+        self.tabs.setCurrentWidget(self.filaments_panel)
+        # Use the existing scanning workflow rather than duplicating material
+        # assignment controls beneath the preview.
+        def scroll_to_protection():
+            content=self.filaments_panel.content
+            label=self.filaments_panel.protected_intro
+            top=label.mapTo(content, label.rect().topLeft()).y()
+            self.filaments_panel.content_scroll.verticalScrollBar().setValue(max(0,top-35))
+        QTimer.singleShot(0, scroll_to_protection)
+
+    def _select_palette_color(self, color, sync_table=True):
+        self._select_palette_colors([color] if color else (), sync_table=sync_table)
+
+    def _select_palette_colors(self, colors, sync_table=True):
+        """Exact source-key selection, kept in sync with the protection table."""
+        selected = tuple(dict.fromkeys(c for c in colors if c in self._source_palette_counts))
+        self._source_palette_selected_colors = selected
+        self._source_palette_selected = selected[-1] if selected else None
+        self.clear_palette_button.setEnabled(bool(selected))
         for swatch in self._source_palette_cells:
-            swatch.set_selected(swatch.hex_color == color)
-        self._on_palette_hover(color)
+            swatch.set_selected(swatch.hex_color in selected)
+        if selected:
+            if len(selected) == 1:
+                self._on_palette_hover(selected[0])
+            else:
+                total_faces = sum(self._source_palette_counts[c] for c in selected)
+                self.source_palette_detail.setText(
+                    f'{len(selected)} selected colors · {total_faces:,} faces · Ctrl+click to add/remove')
+        else:
+            self._on_palette_leave()
+        if sync_table:
+            if len(selected) == 1:
+                color = selected[0]
+                self.filaments_panel.select_source_color(color)
+            else:
+                self.filaments_panel.select_source_colors(selected)
+        self._update_preview_highlights()
+
+    def _filament_color_selected(self, color):
+        if isinstance(color, (tuple, list, set)):
+            self._select_palette_colors(color, sync_table=False)
+        elif color in self._source_palette_counts:
+            self._select_palette_color(color, sync_table=False)
+        elif color is None:
+            self._select_palette_color(None, sync_table=False)
+
+    def _protections_updated(self, assignments):
+        self._preview_protected_colors=set(assignments or ())
+        self.tint_protected.setEnabled(bool(self._preview_protected_colors))
+        if not self._preview_protected_colors:
+            self.tint_protected.setChecked(False)
+        for swatch in self._source_palette_cells:
+            swatch.set_protected(swatch.hex_color in self._preview_protected_colors)
+        self._update_preview_highlights()
+
+    def _update_preview_highlights(self):
+        # An external saved Predicted OBJ has unrelated material assignments.
+        if self.preview_mode.currentText()=='Predicted':
+            self.preview_surface.set_highlights(None, ())
+        else:
+            self.preview_surface.set_highlights(self._source_palette_selected_colors,
+                                                self._preview_protected_colors)
 
     def _populate_source_palette(self, mesh):
         grid = self.source_palette_layout
@@ -891,6 +1011,8 @@ class MainWindow(QMainWindow):
         self._source_palette_cells = []
         self._source_palette_columns = 0
         self._source_palette_selected = None
+        self._source_palette_selected_colors = ()
+        self.clear_palette_button.setEnabled(False)
         palette = tuple(getattr(mesh, 'palette_counts', ()))
         self._source_palette_counts = dict(palette)
         colors = len(palette)
@@ -904,9 +1026,11 @@ class MainWindow(QMainWindow):
         self._on_palette_leave()
         for color, count in palette:
             chip = PaletteSwatch(color, count)
+            chip.set_protected(color in self._preview_protected_colors)
             chip.hovered.connect(self._on_palette_hover)
             chip.left.connect(self._on_palette_leave)
-            chip.chosen.connect(self._select_palette_color)
+            chip.chosen.connect(self._toggle_palette_color)
+            chip.multi_chosen.connect(self._toggle_palette_multi)
             self._source_palette_cells.append(chip)
         self.source_palette_scroll.setVisible(bool(palette))
         if palette:
@@ -967,6 +1091,7 @@ class MainWindow(QMainWindow):
                 self.preview_status.setText(f'{len(mesh.triangles):,} visible / {mesh.source_triangles:,} source triangles{suffix} · {name}')
         elif self.preview_mode.currentText()!='Original':
             self.preview_mode.setCurrentText('Original')
+        self._update_preview_highlights()
 
     def _reset_camera(self):
         self.preview_surface.reset_camera()

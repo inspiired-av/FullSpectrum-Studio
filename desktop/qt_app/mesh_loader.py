@@ -38,6 +38,7 @@ class PreviewMesh:
     palette_counts: tuple = ()  # (HEX, faces) from the COMPLETE source, not the sampled view
     color_status: str = "No explicit source colors detected"
     render_buffer: object = field(default=None, compare=False, repr=False)  # prepared off the UI thread
+    corner_colors: tuple = ()  # exact (color1,color2,color3) per triangle, for GPU interpolation
 
     @property
     def sampled(self):
@@ -106,7 +107,7 @@ def _objects(xml):
 def _mesh_parts(obj, palette=None, default_color=None, native_colors=(), stats=None):
     meshes = [child for child in obj if _local(child.tag) == 'mesh']
     for mesh in meshes:
-        vertices=[]; triangles=[]; face_colors=[]
+        vertices=[]; triangles=[]; face_colors=[]; corner_colors=[]
         for elem in mesh.iter():
             what=_local(elem.tag)
             if what == 'vertex':
@@ -125,6 +126,7 @@ def _mesh_parts(obj, palette=None, default_color=None, native_colors=(), stats=N
                 except (ValueError,TypeError) as exc:
                     raise ValueError('Invalid 3MF triangle index') from exc
                 hex_color=None
+                corners=None
                 pid=elem.get('pid') or obj.get('pid')
                 base=elem.get('p1',obj.get('pindex','0'))
                 if pid and palette and pid in palette:
@@ -133,6 +135,7 @@ def _mesh_parts(obj, palette=None, default_color=None, native_colors=(), stats=N
                         indexes=[int(elem.get(k,base)) for k in ('p1','p2','p3')]
                         values=[table[index] for index in indexes]
                         if all(v is not None for v in values):
+                            corners=tuple(values)
                             if len(set(values))==1:hex_color=values[0]
                             else:
                                 rgb=[tuple(int(c[j:j+2],16) for j in (1,3,5)) for c in values]
@@ -153,13 +156,14 @@ def _mesh_parts(obj, palette=None, default_color=None, native_colors=(), stats=N
                 else:hex_color=default_color
                 triangles.append(t)
                 face_colors.append(hex_color)
+                corner_colors.append(corners if corners else (hex_color,)*3)
                 if len(triangles)>MAX_SOURCE_TRIANGLES:
                     raise ValueError('3MF mesh triangle limit exceeded')
         if not vertices or not triangles:
             continue
         if any(any(i<0 or i>=len(vertices) for i in t) for t in triangles):
             raise ValueError('3MF references an invalid mesh vertex')
-        yield vertices, triangles, face_colors
+        yield vertices, triangles, face_colors, corner_colors
 
 
 HEX_COLOR = re.compile(r'^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$')
@@ -215,7 +219,7 @@ def _unit_scale(root):
             'foot':304.8, 'micron':0.001}.get(root.attrib.get('unit','millimeter').lower(),1.)
 
 
-def _build_mesh(vertices, triangles, name, face_colors=None, stats=None):
+def _build_mesh(vertices, triangles, name, face_colors=None, stats=None, corner_colors=None):
     if not triangles or not vertices:
         raise ValueError('No renderable triangles found in the model')
     minx=min(v[0] for v in vertices);miny=min(v[1] for v in vertices);minz=min(v[2] for v in vertices)
@@ -223,6 +227,8 @@ def _build_mesh(vertices, triangles, name, face_colors=None, stats=None):
     count=len(triangles)
     if face_colors is not None and len(face_colors)!=count:
         raise ValueError('Source colors are not aligned with preview geometry')
+    if corner_colors is not None and len(corner_colors)!=count:
+        raise ValueError('Vertex source colors are not aligned with preview geometry')
     palette=Counter(c for c in (face_colors or ()) if c)
     palette_counts=tuple(sorted(palette.items(),key=lambda x:(-x[1],x[0])))
     if count>MAX_DRAW_TRIANGLES:
@@ -243,11 +249,12 @@ def _build_mesh(vertices, triangles, name, face_colors=None, stats=None):
     if stats.get('blended'):parts.append(f"{stats['blended']:,} interpolated vertex-color faces")
     return PreviewMesh(tuple(vertices),tuple(triangles),count,
                        (minx,miny,minz,maxx,maxy,maxz),name,
-                       tuple(face_colors or ()),palette_counts,' · '.join(parts))
+                       tuple(face_colors or ()),palette_counts,' · '.join(parts),
+                       corner_colors=tuple(corner_colors or ()))
 
 
 def load_3mf(path):
-    vertices=[]; triangles=[]; face_colors=[]; stats=Counter()
+    vertices=[]; triangles=[]; face_colors=[]; corner_colors=[]; stats=Counter()
     try:
         with ZipFile(path) as z:
             entries=z.infolist()
@@ -280,13 +287,14 @@ def load_3mf(path):
                     if member=='3D/3dmodel.model':
                         default_color=native_defaults.get(obj_id,default_color)
                     local_palette=_model_palettes(cache[member][0])
-                    for points,faces,colors in _mesh_parts(node,local_palette,default_color,native_colors,stats):
+                    for points,faces,colors,corners in _mesh_parts(node,local_palette,default_color,native_colors,stats):
                         if total_v+len(points)>MAX_SOURCE_VERTICES or total_t+len(faces)>MAX_SOURCE_TRIANGLES:
                             raise ValueError('Model exceeds preview geometry limits')
                         offset=len(vertices)
                         vertices.extend(_apply(transform,(x*scale,y*scale,z*scale)) for x,y,z in points)
                         triangles.extend(tuple(offset+i for i in t) for t in faces)
                         face_colors.extend(colors)
+                        corner_colors.extend(corners)
                         total_v+=len(points);total_t+=len(faces)
                     for comp_container in node:
                         if _local(comp_container.tag)!='components':continue
@@ -310,7 +318,7 @@ def load_3mf(path):
                     walk('3D/3dmodel.model',item.attrib['objectid'],_matrix(item.get('transform')))
     except (BadZipFile,KeyError,ET.ParseError) as exc:
         raise ValueError('3MF model structure is unreadable') from exc
-    return _build_mesh(vertices,triangles,Path(path).name,face_colors,stats)
+    return _build_mesh(vertices,triangles,Path(path).name,face_colors,stats,corner_colors)
 
 
 def _obj_materials(path):

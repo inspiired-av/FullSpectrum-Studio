@@ -40,9 +40,9 @@ class LargeMeshSafetyTests(unittest.TestCase):
 
     def test_worker_prepares_gpu_off_gui_thread(self):
         root = Path(__file__).resolve().parents[1]
-        worker = (root / 'desktop/qt_app/preview_worker.py').read_text()
+        worker = (root / 'desktop/qt_app/preview_worker.py').read_text(encoding='utf-8')
         self.assertIn('render_buffer=flatten_faces(result)', worker)
-        window = (root / 'desktop/qt_app/main_window.py').read_text()
+        window = (root / 'desktop/qt_app/main_window.py').read_text(encoding='utf-8')
         # The palette panel now accepts an optional viewport width. Assert the
         # method exists instead of freezing its positional argument signature.
         tree = ast.parse(window)
@@ -56,7 +56,7 @@ class LargeMeshSafetyTests(unittest.TestCase):
         # The swatch's styling and interactivity live in their own module.
         palette = (root / 'desktop/qt_app/source_palette.py').read_text(encoding='utf-8')
         self.assertIn("self.setObjectName('sourcePaletteSwatch')", palette)
-        filament = (root / 'desktop/qt_app/filaments_tab.py').read_text()
+        filament = (root / 'desktop/qt_app/filaments_tab.py').read_text(encoding='utf-8')
         self.assertIn('self.filaments.setMinimumHeight(230)', filament)
         self.assertIn('self.solid_table.setMinimumHeight(178)', filament)
         self.assertNotIn('self.solid_table.setFixedHeight', filament)

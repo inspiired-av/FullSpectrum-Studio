@@ -82,20 +82,20 @@ class Stage3BColors(unittest.TestCase):
         shallow=_build_mesh([(0,0,0),(1,0,0),(0,1,0),(0,1,.25)],
                             [(0,1,2),(0,1,3)],'curve')
         gpu=flatten_faces(shallow)
-        first=tuple(gpu[3:6]);second=tuple(gpu[30:33])
+        first=tuple(gpu[3:6]);second=tuple(gpu[39:42])
         for a,b in zip(first,second):self.assertAlmostEqual(a,b,places=5)
         self.assertGreater(first[2],.9)
         edge=_build_mesh([(0,0,0),(1,0,0),(0,1,0),(0,0,1)],
                          [(0,1,2),(0,1,3)],'hard')
         data=flatten_faces(edge)
-        dot=sum(a*b for a,b in zip(data[3:6],data[30:33]))
+        dot=sum(a*b for a,b in zip(data[3:6],data[39:42]))
         self.assertLess(abs(dot),.01,'90 degree mechanical edges must remain sharp')
 
     def test_shaded_color_is_source_color_not_material_guess(self):
         mesh=_build_mesh([(0,0,0),(1,0,0),(0,1,0)],[(0,1,2)],'red',['#FF0000'])
         values=flatten_faces(mesh)
         self.assertEqual(tuple(values[6:9]),(1.,0.,0.))
-        self.assertEqual(len(values),27)
+        self.assertEqual(len(values),36)
 
     def test_optional_real_source_when_requested(self):
         path=os.environ.get('FULLSPECTRUM_QT_STAGE3B_REAL_3MF')

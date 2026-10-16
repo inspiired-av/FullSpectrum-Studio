@@ -7,12 +7,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QSignalBlocker, QItemSelectionModel
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLayout,
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView,
 )
 
 from desktop.qt_app.plan_preferences import FILAMENT_SOURCES
@@ -57,8 +57,27 @@ def _swatch(value):
     return label
 
 
+class ToggleSourceTable(QTableWidget):
+    """Extended row selection with intuitive click-to-clear for one selected row."""
+
+    def mousePressEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton and
+                not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier |
+                                            Qt.KeyboardModifier.ShiftModifier))):
+            row = self.rowAt(int(event.position().y()))
+            selected = self.selectionModel().selectedRows()
+            if row >= 0 and len(selected) == 1 and selected[0].row() == row:
+                self.clearSelection()
+                self.setCurrentCell(-1, -1)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
 class FilamentsTab(QWidget):
     activity_event = Signal(str, str, str)
+    source_color_selected = Signal(object)
+    protections_changed = Signal(object)
     def __init__(self, plan_preferences, settings_path=None, parent=None):
         super().__init__(parent)
         self.plan_preferences = plan_preferences
@@ -178,12 +197,12 @@ class FilamentsTab(QWidget):
         self.protected_count = _text('No protected colors', 'helpText')
         control.addWidget(self.protected_count, 1)
         lay.addLayout(control)
-        self.solid_table = QTableWidget(0, 3)
+        self.solid_table = ToggleSourceTable(0, 3)
         self.solid_table.setObjectName('solidColorTable')
         self.solid_table.setHorizontalHeaderLabels(['Source color', 'Faces', 'Assigned filament'])
         self.solid_table.verticalHeader().setVisible(False)
         self.solid_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.solid_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.solid_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.solid_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.solid_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch)
         self.solid_table.setColumnWidth(0,115)
@@ -203,6 +222,9 @@ class FilamentsTab(QWidget):
         self.remove_button.clicked.connect(self._remove_protection)
         assign_row.addWidget(self.remove_button)
         lay.addLayout(assign_row)
+        self.bulk_hint = _text('Multiple source colors assigned to one filament will share its output material color.', 'templateWarning')
+        self.bulk_hint.setVisible(False)
+        lay.addWidget(self.bulk_hint)
         lay.addWidget(_text('Model highlighting will be connected in Stage 3. '
                             'Protected colors will be passed to the engine in Stage 4.', 'helpText'))
         self._update_actions()
@@ -438,6 +460,8 @@ class FilamentsTab(QWidget):
         self.model_path=str(path or '')
         self.preferences.use_model(self.model_path)
         self.source_colors={}
+        self.source_color_selected.emit(None)
+        self.protections_changed.emit({})
         self.protected_intro.setObjectName('bodyMuted')
         self.protected_intro.style().unpolish(self.protected_intro)
         self.protected_intro.style().polish(self.protected_intro)
@@ -491,9 +515,12 @@ class FilamentsTab(QWidget):
                 'Standard 3MF material colors: exact face-color assignments. '
                 'Protection choices are model-specific and UI-only until Stage 4.')
         self._populate_solid_colors()
+        self.protections_changed.emit(dict(self.preferences.solid_assignments))
 
     def _populate_solid_colors(self):
-        self.solid_table.setRowCount(len(self.source_colors))
+        selected_colors = set(self._selected_colors())
+        with QSignalBlocker(self.solid_table):
+            self.solid_table.setRowCount(len(self.source_colors))
         for row,(hexcolor,count) in enumerate(self.source_colors.items()):
             item=QTableWidgetItem(hexcolor)
             item.setForeground(QColor('#101418') if QColor(hexcolor).lightness()>140 else QColor('#ffffff'))
@@ -503,21 +530,59 @@ class FilamentsTab(QWidget):
             key=self.preferences.solid_assignments.get(hexcolor)
             match=next((o for o in self.options if o['key']==key),None)
             text=(match.get('name') or key) if match else ('Not protected' if not key else 'Unavailable filament')
-            self.solid_table.setItem(row,2,QTableWidgetItem(text))
+            assignment=QTableWidgetItem(('● ' + text) if key and match else text)
+            if key and match:
+                assignment.setForeground(QColor('#41e5ca'))
+                assignment.setToolTip('Protected · assigned to physical filament')
+            self.solid_table.setItem(row,2,assignment)
             self.solid_table.setRowHeight(row,29)
+        # Rebuilding the table must not erase a multi-row selection.
+        self.select_source_colors(selected_colors)
         self.protected_count.setText(f'{len(self.preferences.solid_assignments)} protected · {len(self.source_colors)} source colors')
         self._update_actions()
 
+    def _selected_colors(self):
+        model = self.solid_table.selectionModel()
+        if model is None:
+            return ()
+        return tuple(self.solid_table.item(index.row(), 0).text()
+                     for index in sorted(model.selectedRows(), key=lambda i: i.row())
+                     if self.solid_table.item(index.row(), 0) is not None)
+
     def _current_color(self):
-        row=self.solid_table.currentRow()
-        return self.solid_table.item(row,0).text() if row>=0 and self.solid_table.item(row,0) else None
+        colors = self._selected_colors()
+        return colors[0] if len(colors) == 1 else None
 
     def _selection_changed(self):
-        chosen=self._current_color()
+        colors = self._selected_colors()
+        self.source_color_selected.emit(colors[0] if len(colors) == 1 else colors if colors else None)
         self._update_actions()
-        if chosen in self.preferences.solid_assignments:
-            i=self.target.findData(self.preferences.solid_assignments[chosen])
-            if i>=0:self.target.setCurrentIndex(i)
+        if len(colors) == 1 and colors[0] in self.preferences.solid_assignments:
+            i = self.target.findData(self.preferences.solid_assignments[colors[0]])
+            if i >= 0:
+                self.target.setCurrentIndex(i)
+
+    def select_source_color(self, color):
+        self.select_source_colors([color] if color else ())
+
+    def select_source_colors(self, colors):
+        """Select exact source keys without sending signals back into the palette."""
+        wanted = set(colors or ())
+        with QSignalBlocker(self.solid_table):
+            self.solid_table.clearSelection()
+            self.solid_table.setCurrentCell(-1,-1)
+            model = self.solid_table.selectionModel()
+            first = None
+            for row in range(self.solid_table.rowCount()):
+                item = self.solid_table.item(row, 0)
+                if item is not None and item.text() in wanted:
+                    model.select(self.solid_table.model().index(row, 0),
+                                 QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+                    if first is None:
+                        first = item
+            if first is not None:
+                self.solid_table.scrollToItem(first)
+        self._update_actions()
 
     def _refresh_targets(self):
         previous=self.target.currentData()
@@ -531,23 +596,46 @@ class FilamentsTab(QWidget):
         self._update_actions()
 
     def _protect(self):
-        color=self._current_color(); key=self.target.currentData()
+        colors = self._selected_colors()
+        key = self.target.currentData()
+        if not colors:
+            return
         try:
-            if not self._accept_table(True):return
-            self.preferences.protect(color,key,self.source_colors,self.options)
+            if not self._accept_table(True):
+                return
+            # Validate the entire batch before assigning any source color.
+            from desktop.qt_app.filament_preferences import _HEX
+            valid_keys = {o['key'] for o in self.options if o['key'] not in self.preferences.disabled}
+            if key not in valid_keys:
+                raise ValueError('Choose an enabled physical filament.')
+            if any(not _HEX.fullmatch(color) or color not in self.source_colors for color in colors):
+                raise ValueError('Select exact colors from the original source model.')
+            for color in colors:
+                self.preferences.protect(color, key, self.source_colors, self.options)
         except ValueError as exc:
-            QMessageBox.warning(self,'Protect Solid Colors',str(exc));return
+            QMessageBox.warning(self, 'Protect Solid Colors', str(exc))
+            return
         self._populate_solid_colors()
-        self.activity_event.emit('info', 'Protected color',
-                                 'Model-specific protection assigned (not yet exported).')
+        if len(colors) == 1:
+            color = colors[0]
+            self.select_source_color(color)
+        self.protections_changed.emit(dict(self.preferences.solid_assignments))
+        self.activity_event.emit('info', 'Protected colors',
+                                 f'{len(colors)} model-specific color(s) assigned to one filament (not yet exported).')
 
     def _remove_protection(self):
-        color=self._current_color()
-        if color:
+        colors = self._selected_colors()
+        if not colors:
+            return
+        for color in colors:
             self.preferences.unprotect(color)
-            self._populate_solid_colors()
-            self.activity_event.emit('info', 'Protected color',
-                                     'Model-specific protection cleared.')
+        self._populate_solid_colors()
+        if len(colors) == 1:
+            color = colors[0]
+            self.select_source_color(color)
+        self.protections_changed.emit(dict(self.preferences.solid_assignments))
+        self.activity_event.emit('info', 'Protected colors',
+                                 f'Protection cleared for {len(colors)} selected color(s).')
 
     def _update_actions(self):
         has_options=bool(self._rows)
@@ -556,8 +644,10 @@ class FilamentsTab(QWidget):
         self.save_button.setEnabled(has_options)
         self.revert_button.setEnabled(has_options)
         self.scan_button.setEnabled(bool(self.model_path) and Path(self.model_path).is_file())
-        self.protect_button.setEnabled(bool(self._current_color()) and self.target.count()>0)
-        self.remove_button.setEnabled(bool(self._current_color()) and self._current_color() in self.preferences.solid_assignments)
+        selected = self._selected_colors()
+        self.bulk_hint.setVisible(len(selected) > 1)
+        self.protect_button.setEnabled(bool(selected) and self.target.count() > 0)
+        self.remove_button.setEnabled(any(c in self.preferences.solid_assignments for c in selected))
 
     def closeEvent(self,event):
         # Do not cancel Python threads mid-archive-read. Wait for workers to finish

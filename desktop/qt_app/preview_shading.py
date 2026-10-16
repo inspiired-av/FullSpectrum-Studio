@@ -34,6 +34,8 @@ def flatten_faces(mesh, crease_angle=53):
         for idx in set(tri):adja=adjacency[idx];adja.append(face_i)
     cos_limit=math.cos(math.radians(crease_angle))
     palette=getattr(mesh,'face_colors',())
+    corner_colors=getattr(mesh,'corner_colors',())
+    use_corners=len(corner_colors)==len(faces)
     result=array('f')
     for i,tri in enumerate(faces):
         normal,_=normals[i]
@@ -41,7 +43,13 @@ def flatten_faces(mesh, crease_angle=53):
         if src and len(src)==7:
             color=tuple(int(src[j:j+2],16)/255. for j in (1,3,5))
         else:color=(.56,.77,.84)
-        for idx in tri:
+        tag=color if src else (-1.,-1.,-1.)
+        for corner_idx,idx in enumerate(tri):
+            vertex_color=color
+            if use_corners:
+                corner=corner_colors[i][corner_idx]
+                if corner and len(corner)==7:
+                    vertex_color=tuple(int(corner[j:j+2],16)/255. for j in (1,3,5))
             sx=sy=sz=0.
             for j in adjacency[idx]:
                 other,area=normals[j]
@@ -49,6 +57,6 @@ def flatten_faces(mesh, crease_angle=53):
                     sx+=other[0]*area;sy+=other[1]*area;sz+=other[2]*area
             length=math.sqrt(sx*sx+sy*sy+sz*sz)
             smoothed=(sx/length,sy/length,sz/length) if length>1.e-12 else normal
-            result.extend((*vertices[idx],*smoothed,*color))
+            result.extend((*vertices[idx],*smoothed,*vertex_color,*tag))
     return result
 

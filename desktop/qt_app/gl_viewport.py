@@ -19,18 +19,28 @@ VERTEX_SHADER = '''#version 330 core
 layout(location=0) in vec3 position;
 layout(location=1) in vec3 normal;
 layout(location=2) in vec3 color;
+layout(location=3) in vec3 exactFaceTag;
 uniform mat4 projectionView;
 out vec3 worldNormal;
 out vec3 faceColor;
+flat out vec3 sourceTag;
 void main() {
     gl_Position = projectionView * vec4(position, 1.0);
     worldNormal = normal;
     faceColor = color;
+    sourceTag = exactFaceTag;
 }
 '''
 FRAGMENT_SHADER = '''#version 330 core
 in vec3 worldNormal;
 in vec3 faceColor;
+flat in vec3 sourceTag;
+uniform vec3 selectedSourceColor;
+uniform int selectedExtraCount;
+uniform vec3 selectedExtraColors[64];
+uniform int protectedCount;
+uniform int showProtectedOverlay;
+uniform vec3 protectedSourceColors[128];
 out vec4 fragColor;
 void main() {
     vec3 n = normalize(worldNormal);
@@ -41,6 +51,25 @@ void main() {
     float fill = abs(dot(n, fillLight));
     float shade = 0.54 + 0.34 * key + 0.12 * fill;
     vec3 surface = faceColor * shade;
+    bool isSelected = selectedSourceColor.r >= 0.0 && distance(sourceTag, selectedSourceColor) < 0.0025;
+    if (!isSelected) {
+        for (int i = 0; i < selectedExtraCount; ++i) {
+            if (distance(sourceTag, selectedExtraColors[i]) < 0.0025) {
+                isSelected = true;
+                break;
+            }
+        }
+    }
+    if (isSelected) {
+        surface = mix(surface, vec3(1.0, 0.76, 0.20), 0.67);
+    } else if (showProtectedOverlay != 0) {
+        for (int i = 0; i < protectedCount; ++i) {
+            if (distance(sourceTag, protectedSourceColors[i]) < 0.0025) {
+                surface = mix(surface, vec3(0.20, 0.95, 0.80), 0.55);
+                break;
+            }
+        }
+    }
     fragColor = vec4(surface, 1.0);
 }
 '''
@@ -62,6 +91,7 @@ def _upload_projection_view(gl, location, matrix):
 
 class ModelViewport(QOpenGLWidget):
     render_error = Signal(str)
+    background_clicked = Signal()
 
     def __init__(self,parent=None):
         super().__init__(parent)
@@ -78,7 +108,12 @@ class ModelViewport(QOpenGLWidget):
         self._mesh=None;self._data=None;self._dirty=False;self._verts=0
         self._gl=None;self._program=0;self._vao=0;self._vbo=0;self._error=''
         self._last=None;self._drag_button=None
+        self._press_position=None
         self.wireframe=False
+        self.selected_source_color=None
+        self.selected_source_colors=()
+        self.protected_source_colors=()
+        self.show_protected_overlay=False
         self.yaw=-1.47;self.pitch=0.30;self.zoom=1.
         self.pan_x=0.;self.pan_y=0.
         self._center=(0.,0.,0.);self._radius=1.
@@ -91,12 +126,30 @@ class ModelViewport(QOpenGLWidget):
         self._mesh=mesh
         # Prefer geometry prepared by ModelLoadWorker so the UI remains responsive.
         self._data=(getattr(mesh, 'render_buffer', None) or _flatten_faces(mesh)) if mesh else None
-        self._verts=len(self._data)//9 if self._data is not None else 0
+        self._verts=len(self._data)//12 if self._data is not None else 0
         self._dirty=True
         self.reset_camera()
 
     def clear_mesh(self):
         self.set_mesh(None)
+        self.set_highlights(None, ())
+
+    def set_highlights(self, selected=None, protected=()):
+        # Shader uniforms avoid rebuilding the entire mesh when colors change.
+        if isinstance(selected, (tuple, list, set)):
+            selected_colors = tuple(dict.fromkeys(str(v).upper() for v in selected if v))
+        else:
+            selected_colors = (str(selected).upper(),) if selected else ()
+        self.selected_source_colors = selected_colors[:65]
+        # Retain single-color property expected by existing Stage 3C UI tests.
+        self.selected_source_color = self.selected_source_colors[-1] if selected_colors else None
+        self.protected_source_colors=tuple(sorted({str(v).upper() for v in protected if v}))[:128]
+        self.update()
+
+    def set_protected_overlay(self, enabled):
+        """Optional inspection tint; original material colors remain intact by default."""
+        self.show_protected_overlay=bool(enabled)
+        self.update()
 
     def reset_camera(self):
         self.yaw=-1.47;self.pitch=0.30;self.zoom=1.
@@ -149,11 +202,13 @@ class ModelViewport(QOpenGLWidget):
         data=self._data.tobytes() if self._data is not None else b''
         gl.glBufferData(gl.GL_ARRAY_BUFFER,len(data),data,gl.GL_STATIC_DRAW)
         gl.glEnableVertexAttribArray(0)
-        gl.glVertexAttribPointer(0,3,gl.GL_FLOAT,gl.GL_FALSE,36,ctypes.c_void_p(0))
+        gl.glVertexAttribPointer(0,3,gl.GL_FLOAT,gl.GL_FALSE,48,ctypes.c_void_p(0))
         gl.glEnableVertexAttribArray(1)
-        gl.glVertexAttribPointer(1,3,gl.GL_FLOAT,gl.GL_FALSE,36,ctypes.c_void_p(12))
+        gl.glVertexAttribPointer(1,3,gl.GL_FLOAT,gl.GL_FALSE,48,ctypes.c_void_p(12))
         gl.glEnableVertexAttribArray(2)
-        gl.glVertexAttribPointer(2,3,gl.GL_FLOAT,gl.GL_FALSE,36,ctypes.c_void_p(24))
+        gl.glVertexAttribPointer(2,3,gl.GL_FLOAT,gl.GL_FALSE,48,ctypes.c_void_p(24))
+        gl.glEnableVertexAttribArray(3)
+        gl.glVertexAttribPointer(3,3,gl.GL_FLOAT,gl.GL_FALSE,48,ctypes.c_void_p(36))
         gl.glBindVertexArray(0)
         self._dirty=False
 
@@ -186,6 +241,20 @@ class ModelViewport(QOpenGLWidget):
             location=gl.glGetUniformLocation(self._program,'projectionView')
             # Qt copyDataTo() is row-major; helper requests GL transpose.
             _upload_projection_view(gl, location, mvp)
+            def to_rgb(value):
+                return tuple(int(value[j:j+2],16)/255. for j in (1,3,5))
+            location=gl.glGetUniformLocation(self._program,'selectedSourceColor')
+            selected=self.selected_source_color
+            gl.glUniform3f(location,*(to_rgb(selected) if selected and len(selected)==7 else (-1.,-1.,-1.)))
+            other_selected=self.selected_source_colors[:-1]
+            gl.glUniform1i(gl.glGetUniformLocation(self._program,'selectedExtraCount'),len(other_selected))
+            for i,color in enumerate(other_selected):
+                gl.glUniform3f(gl.glGetUniformLocation(self._program,f'selectedExtraColors[{i}]'),*to_rgb(color))
+            protected=self.protected_source_colors
+            gl.glUniform1i(gl.glGetUniformLocation(self._program,'protectedCount'),len(protected))
+            gl.glUniform1i(gl.glGetUniformLocation(self._program,'showProtectedOverlay'),int(self.show_protected_overlay))
+            for i,color in enumerate(protected):
+                gl.glUniform3f(gl.glGetUniformLocation(self._program,f'protectedSourceColors[{i}]'),*to_rgb(color))
             gl.glBindVertexArray(self._vao)
             if self.wireframe:gl.glPolygonMode(gl.GL_FRONT_AND_BACK,gl.GL_LINE)
             gl.glDrawArrays(gl.GL_TRIANGLES,0,self._verts)
@@ -197,6 +266,7 @@ class ModelViewport(QOpenGLWidget):
 
     def mousePressEvent(self,event):
         self._last=event.position();self._drag_button=event.button()
+        self._press_position=event.position() if event.button()==Qt.MouseButton.LeftButton else None
         event.accept()
 
     def mouseMoveEvent(self,event):
@@ -212,6 +282,12 @@ class ModelViewport(QOpenGLWidget):
         self.update();event.accept()
 
     def mouseReleaseEvent(self,event):
+        if (self._press_position is not None and
+            event.button()==Qt.MouseButton.LeftButton and
+            (event.position()-self._press_position).manhattanLength()<5):
+            # A click away clears a swatch selection; an orbit drag does not.
+            self.background_clicked.emit()
+        self._press_position=None
         self._last=None;self._drag_button=None
         event.accept()
 
