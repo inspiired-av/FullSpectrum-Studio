@@ -7,15 +7,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QSignalBlocker, QItemSelectionModel
+from PySide6.QtCore import Qt, QThread, Signal, QSignalBlocker, QItemSelectionModel, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLayout,
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView,
+    QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView, QProgressBar,
 )
 
 from desktop.qt_app.plan_preferences import FILAMENT_SOURCES
+from desktop.qt_app.wheel_safe_combo import WheelSafeComboBox
+from desktop.qt_app.section_help import help_heading
 from desktop.settings_store import load_settings, save_settings
 
 from desktop.qt_app.filament_preferences import (
@@ -78,6 +80,7 @@ class FilamentsTab(QWidget):
     activity_event = Signal(str, str, str)
     source_color_selected = Signal(object)
     protections_changed = Signal(object)
+    planning_changed = Signal(bool)  # Valid live (unsaved) filament choices changed.
     def __init__(self, plan_preferences, settings_path=None, parent=None):
         super().__init__(parent)
         self.plan_preferences = plan_preferences
@@ -94,6 +97,10 @@ class FilamentsTab(QWidget):
         self._workers = []
         self._rows = []
         self._changing = False
+        self._population_active = False
+        self._populate_index = 0
+        self.selection_is_valid = True
+        self.selection_error = ''
         self._build()
         self._sync_status()
 
@@ -120,8 +127,8 @@ class FilamentsTab(QWidget):
         lay.setContentsMargins(10, 13, 10, 14)
         lay.setSpacing(9)
         self.content_scroll.setWidget(self.content)
-        lay.addWidget(_text('FILAMENT SOURCE', 'sectionTitle'))
-        self.filament_source = QComboBox()
+        lay.addWidget(help_heading('filament_source', 'FILAMENT SOURCE'))
+        self.filament_source = WheelSafeComboBox()
         self.filament_source.setObjectName('filamentSource')
         for label, value in FILAMENT_SOURCES:
             self.filament_source.addItem(label, value)
@@ -138,7 +145,7 @@ class FilamentsTab(QWidget):
         self.custom_library_browse = QPushButton('Browse…')
         library_row.addWidget(self.custom_library_browse)
         lay.addWidget(self.custom_file_row)
-        lay.addWidget(_text('FILAMENT COLORS', 'sectionTitle'))
+        lay.addWidget(help_heading('filament_colors', 'FILAMENT COLORS'))
         self.source_info = _text('Select a filament source above and load available colors.', 'bodyMuted')
         lay.addWidget(self.source_info)
         tools = QHBoxLayout()
@@ -152,6 +159,11 @@ class FilamentsTab(QWidget):
         lay.addLayout(tools)
         self.summary = _text('No filament source loaded.', 'helpText')
         lay.addWidget(self.summary)
+        self.load_progress = QProgressBar()
+        self.load_progress.setObjectName('filamentLoadProgress')
+        self.load_progress.setTextVisible(True)
+        self.load_progress.setVisible(False)
+        lay.addWidget(self.load_progress)
         self.filaments = QTableWidget(0, 4)
         self.filaments.setObjectName('filamentTable')
         self.filaments.setHorizontalHeaderLabels(['Use', 'Color', 'Filament', 'Pin'])
@@ -189,7 +201,7 @@ class FilamentsTab(QWidget):
         lay.addLayout(actions)
 
         lay.addSpacing(6)
-        lay.addWidget(_text('PROTECT SOLID COLORS', 'sectionTitle'))
+        lay.addWidget(help_heading('protect_solid_colors', 'PROTECT SOLID COLORS'))
         self.protected_intro = _text('Assign source colors to enabled physical filaments. '
                                       'Assignments apply only to the selected model.', 'bodyMuted')
         lay.addWidget(self.protected_intro)
@@ -213,7 +225,7 @@ class FilamentsTab(QWidget):
         self.solid_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.solid_table.itemSelectionChanged.connect(self._selection_changed)
         lay.addWidget(self.solid_table, 2)
-        self.target = QComboBox()
+        self.target = WheelSafeComboBox()
         self.target.setMinimumWidth(100)
         lay.addWidget(self.target)
         assign_row = QHBoxLayout()
@@ -259,14 +271,21 @@ class FilamentsTab(QWidget):
         sig = source, library
         if not force and sig == self._source_signature:
             return
+        # Invalidate any scheduled batches before replacing the table.
+        was_populating = self._population_active
+        self._load_serial += 1
+        self._population_active = False
+        self._changing = False
+        self.selection_is_valid = True
+        self.selection_error = ''
+        self.load_progress.setVisible(False)
         # A source change or refresh is navigation, not Save Filaments. An
         # inventory can contain just one color; it must not trap the user in
         # that source with a modal validation error. Stage valid edits only.
         # Explicit Save / Protect still enforce the >=2 distinct-color rule.
-        if self.options:
+        if self.options and not was_populating:
             self._accept_table(show_error=False)
         self._source_signature = sig
-        self._load_serial += 1
         serial = self._load_serial
         self.options = []
         self.filaments.setRowCount(0)
@@ -288,6 +307,9 @@ class FilamentsTab(QWidget):
         self.source_info.setText('Loading filament options from the current source…')
         self.summary.setText('Loading…')
         self.reload_button.setEnabled(False)
+        self.load_progress.setRange(0, 0)  # Indeterminate: catalog lookup has no progress API.
+        self.load_progress.setFormat('Loading filament library…')
+        self.load_progress.setVisible(True)
         self._update_actions()
         self._start(load_filament_options, (source, None, library),
                     lambda value, error, s=serial: self._options_loaded(s,value,error))
@@ -297,52 +319,86 @@ class FilamentsTab(QWidget):
             return
         self.reload_button.setEnabled(True)
         if error:
+            self.load_progress.setVisible(False)
             self.activity_event.emit('warning', 'Filament source', 'Unable to load filament source: ' + str(error))
             self.source_info.setText('Unable to read filament source.')
             self.summary.setText(str(error))
             self._update_actions()
             return
         self.options = list(value or [])
-        self.activity_event.emit('success', 'Filament source',
-                                 f'Loaded {len(self.options)} available filament colors.')
-        self._populate_options()
         self.source_info.setText('Filament source: ' + self._source_settings()[0].replace('-', ' ').title())
-        self._sync_status()
+        self._populate_options()
 
     def _populate_options(self):
+        # Small sources remain synchronous for fast first-use and compatibility
+        # with existing Qt regression tests. Large libraries are built in
+        # bounded GUI batches, so Windows never has to paint hundreds of cell
+        # widgets in one blocking event-loop iteration.
+        self._population_active = True
         self._changing = True
         self.filaments.setRowCount(len(self.options))
         self._rows = []
-        for i, opt in enumerate(self.options):
-            key = opt['key']
-            enabled = QCheckBox()
-            enabled.setChecked(self.preferences.selected(key))
-            cell = QWidget(); h = QHBoxLayout(cell)
-            h.setContentsMargins(7,0,0,0); h.addWidget(enabled)
-            self.filaments.setCellWidget(i,0,cell)
-            sw = QWidget(); sh = QHBoxLayout(sw)
-            sh.setContentsMargins(5,0,0,0); sh.addWidget(_swatch(opt.get('color','#777777')))
-            self.filaments.setCellWidget(i,1,sw)
-            name = QTableWidgetItem(str(opt.get('name') or key))
-            details = ' · '.join(str(v) for v in (opt.get('series'),opt.get('color')) if v)
-            if isinstance(opt.get('remainingGrams'),(float,int)):
-                details += f" · {opt['remainingGrams']:.0f} g remaining"
-            name.setToolTip(details + '\n' + str(key))
-            self.filaments.setItem(i,2,name)
-            pin = QCheckBox()
-            pin.setToolTip('Pin to a physical filament slot')
-            pin.setChecked(self.preferences.is_pinned(key))
-            cell2 = QWidget(); ph=QHBoxLayout(cell2)
-            ph.setContentsMargins(7,0,0,0); ph.addWidget(pin)
-            self.filaments.setCellWidget(i,3,cell2)
-            self._rows.append((opt,enabled,pin))
-            enabled.toggled.connect(lambda checked, idx=i: self._toggle_enabled(idx, checked))
-            pin.toggled.connect(lambda checked, idx=i: self._toggle_pinned(idx, checked))
-            self.filaments.setRowHeight(i,32)
+        self._populate_index = 0
+        self.load_progress.setRange(0, max(1, len(self.options)))
+        self.load_progress.setFormat('%v / %m filaments prepared')
+        self.load_progress.setValue(0)
+        self.load_progress.setVisible(bool(self.options))
+        self._populate_batch(self._load_serial)
+
+    def _populate_batch(self, serial):
+        if serial != self._load_serial or not self._population_active:
+            return
+        # Keep the UI responsive while a large catalog table is constructed.
+        batch = 24 if len(self.options) > 80 else len(self.options)
+        end = min(len(self.options), self._populate_index + batch)
+        self.filaments.setUpdatesEnabled(False)
+        try:
+            for i in range(self._populate_index, end):
+                opt = self.options[i]
+                key = opt['key']
+                enabled = QCheckBox()
+                enabled.setChecked(self.preferences.selected(key))
+                cell = QWidget(); h = QHBoxLayout(cell)
+                h.setContentsMargins(7,0,0,0); h.addWidget(enabled)
+                self.filaments.setCellWidget(i,0,cell)
+                sw = QWidget(); sh = QHBoxLayout(sw)
+                sh.setContentsMargins(5,0,0,0); sh.addWidget(_swatch(opt.get('color','#777777')))
+                self.filaments.setCellWidget(i,1,sw)
+                name = QTableWidgetItem(str(opt.get('name') or key))
+                details = ' · '.join(str(v) for v in (opt.get('series'),opt.get('color')) if v)
+                if isinstance(opt.get('remainingGrams'),(float,int)):
+                    details += f" · {opt['remainingGrams']:.0f} g remaining"
+                name.setToolTip(details + '\n' + str(key))
+                self.filaments.setItem(i,2,name)
+                pin = QCheckBox()
+                pin.setToolTip('Pin to a physical filament slot')
+                pin.setChecked(self.preferences.is_pinned(key))
+                cell2 = QWidget(); ph=QHBoxLayout(cell2)
+                ph.setContentsMargins(7,0,0,0); ph.addWidget(pin)
+                self.filaments.setCellWidget(i,3,cell2)
+                self._rows.append((opt,enabled,pin))
+                enabled.toggled.connect(lambda checked, idx=i: self._toggle_enabled(idx, checked))
+                pin.toggled.connect(lambda checked, idx=i: self._toggle_pinned(idx, checked))
+                self.filaments.setRowHeight(i,32)
+        finally:
+            self.filaments.setUpdatesEnabled(True)
+        self._populate_index = end
+        self.load_progress.setValue(end)
+        self.summary.setText(f'Preparing filament list… {end:,} / {len(self.options):,}')
+        if end < len(self.options):
+            QTimer.singleShot(0, lambda s=serial: self._populate_batch(s))
+            return
+        self._population_active = False
         self._changing = False
+        self.selection_is_valid = True
+        self.selection_error = ''
+        self.load_progress.setVisible(False)
         self._filter()
         self._refresh_targets()
-        self._update_actions()
+        self._sync_status()
+        # Emit success only after table rows and search are fully usable.
+        self.activity_event.emit('success', 'Filament source',
+                                 f'Loaded {len(self.options)} available filament colors.')
 
     def _toggle_enabled(self, index, checked):
         if self._changing:
@@ -361,9 +417,21 @@ class FilamentsTab(QWidget):
         self._table_changed()
 
     def _table_changed(self):
-        self._sync_status(table_pending=True)
+        # Stage valid checkbox edits in memory immediately. The forecast worker
+        # snapshots these preferences; Save Filaments still controls persistence.
+        # Invalid combinations must NEVER fall back to a previous pin set.
+        old_protections = dict(self.preferences.solid_assignments)
+        self.selection_is_valid = self._accept_table(show_error=False)
+        self._sync_status(table_pending=not self.selection_is_valid)
+        if not self.selection_is_valid:
+            self.summary.setText(self.summary.text() + ' · Invalid: ' + self.selection_error)
         self._refresh_targets()
         self._update_actions()
+        if self.selection_is_valid and self.preferences.solid_assignments != old_protections:
+            # Disabling a filament removes source-color protections targeting it.
+            self._populate_solid_colors()
+            self.protections_changed.emit(dict(self.preferences.solid_assignments))
+        self.planning_changed.emit(self.selection_is_valid)
 
     def _read_rows(self):
         enabled = {o['key'] for o, e, p in self._rows if e.isChecked()}
@@ -372,14 +440,20 @@ class FilamentsTab(QWidget):
 
     def _accept_table(self, show_error):
         if not self.options:
+            self.selection_error = ''
             return True
+        if self._population_active:
+            self.selection_error = 'Wait for the filament library to finish loading.'
+            return False  # Never stage incomplete enable/pin selections.
         enabled,pinned = self._read_rows()
         try:
             self.preferences.apply(self.options,enabled,pinned,self._max_pins())
         except ValueError as exc:
+            self.selection_error = str(exc)
             if show_error:
                 QMessageBox.warning(self, 'Invalid Filament Selection', str(exc))
             return False
+        self.selection_error = ''
         return True
 
     def _sync_status(self, table_pending=False):
@@ -406,8 +480,15 @@ class FilamentsTab(QWidget):
         self._table_changed()
 
     def _filter(self):
+        # Filtering while Qt has not finished creating row items is unsafe and
+        # can make a partially populated table appear empty. The search text
+        # is retained and applied once the final batch is ready.
+        if self._population_active:
+            self.summary.setText(f'Preparing filament list… {self._populate_index:,} / '
+                                 f'{len(self.options):,}; search will apply when ready')
+            return
         query=self.search.text().casefold().strip()
-        for i,opt in enumerate(self.options):
+        for i,opt in enumerate(self.options[:self.filaments.rowCount()]):
             text=' '.join(str(opt.get(k,'') or '') for k in ('name','series','color','key')).casefold()
             self.filaments.setRowHidden(i, bool(query and query not in text))
 
@@ -437,6 +518,8 @@ class FilamentsTab(QWidget):
 
     def revert(self):
         self.preferences.revert()
+        self.selection_is_valid = True
+        self.selection_error = ''
         # Revert should not revalidate unsaved current-table selections.
         self.options = []
         self._rows = []
@@ -457,6 +540,7 @@ class FilamentsTab(QWidget):
         self._sync_status()
         if hasattr(self.window(), '_update_plan_dirty_state'):
             self.window()._update_plan_dirty_state()
+        self.planning_changed.emit(True)
 
     def set_model(self, path):
         self.model_path=str(path or '')
@@ -711,7 +795,7 @@ class FilamentsTab(QWidget):
                                  f'Protection cleared for {len(colors)} selected color(s).')
 
     def _update_actions(self):
-        has_options=bool(self._rows)
+        has_options=bool(self._rows) and not self._population_active
         self.enable_all.setEnabled(has_options)
         self.clear_pins.setEnabled(has_options)
         self.save_button.setEnabled(has_options)

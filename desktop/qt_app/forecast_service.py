@@ -121,4 +121,20 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
         'outputSlots': output.get('outputSlots'),
         'warnings': list(output.get('warnings') or []),
         'plannerMode': output.get('plannerMode'),
+        # Stage 4B: preserve the EXISTING native optimizer's details for a
+        # read-only inspection table; never re-optimize or guess recipes here.
+        'planningDetails': {
+            'sourceSlots': output.get('sourceSlots'),
+            'realSlots': output.get('realSlots'),
+            'outputSlots': output.get('outputSlots'),
+            'maxOutputColors': s['max_output_colors'],
+            'plannerMode': output.get('plannerMode'),
+            'qualityBias': output.get('qualityBias'),
+            'qualityBiasMode': output.get('qualityBiasMode'),
+            'pinnedAnchorKeys': list(output.get('pinnedAnchorKeys') or []),
+            'anchors': list(output.get('anchors') or []),
+            'recipes': list(output.get('recipes') or []),
+            'recommendation': output.get('recommendation'),
+            'printability': dict(output.get('printability') or {}),
+        },
     }

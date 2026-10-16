@@ -82,7 +82,10 @@ class NativeColorsTests(unittest.TestCase):
         source=(PACKAGE/'desktop/qt_app/main_window.py').read_text(encoding='utf-8')
         tab=(PACKAGE/'desktop/qt_app/filaments_tab.py').read_text(encoding='utf-8')
         self.assertIn('Manage Filament Colors…',source)
-        self.assertIn("self.filament_source = QComboBox()",tab)
+        # Stage 4B uses a wheel-safe QComboBox subclass so scrolling the
+        # surrounding page cannot accidentally change the filament source.
+        self.assertIn("self.filament_source = WheelSafeComboBox()",tab)
+        self.assertIn('from desktop.qt_app.wheel_safe_combo import WheelSafeComboBox',tab)
         self.assertNotIn('col.addWidget(_section_heading("Filament Source"))',source)
 
 

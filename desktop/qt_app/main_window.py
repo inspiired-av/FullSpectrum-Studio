@@ -1,8 +1,10 @@
-"""FullSpectrum Studio Qt Stage 4A: read-only inspection and real plan forecasts.
+"""FullSpectrum Studio Qt Stage 4B: read-only inspection and real plan forecasts.
 
 Conversion/export remain in the existing frontend until Stage 4D.
 """
 from __future__ import annotations
+
+import time
 
 from pathlib import Path
 
@@ -27,6 +29,11 @@ from desktop.qt_app.preview_worker import ModelLoadWorker
 from desktop.qt_app.forecast_worker import ForecastWorker
 from desktop.qt_app.forecast_service import make_request
 from desktop.qt_app.forecast_view_state import ForecastViewState
+from desktop.qt_app.planning_details_panel import PlanningDetailsPanel
+from desktop.qt_app.wheel_safe_combo import WheelSafeComboBox
+from desktop.qt_app.section_help import SectionHelpButton, help_heading
+from desktop.qt_app.forecast_visuals import RingGauge, WorstMatchPanel
+from desktop.qt_app.forecast_setup_gate import evaluate_setup
 from desktop.qt_app.source_palette import PaletteSwatch, responsive_columns
 from desktop.qt_app.results_tab import ResultsTab
 from desktop.qt_app.shell_state import (
@@ -76,21 +83,36 @@ class MainWindow(QMainWindow):
         self._forecast_serial = 0
         self._forecast_pending = False
         self._forecast_task = None
+        self._pending_review_filament_key = None
         self._inspection_serial = 0
         self._inspection_threads = []
         self._forecast_timer = QTimer(self)
         self._forecast_timer.setSingleShot(True)
         self._forecast_timer.setInterval(950)
         self._forecast_timer.timeout.connect(self._request_forecast)
+        self._forecast_heartbeat = QTimer(self)
+        self._forecast_heartbeat.setInterval(1500)
+        self._forecast_heartbeat.timeout.connect(self._update_forecast_elapsed)
+        self._forecast_started_at = 0.0
+        self._forecast_last_stage = 'Waiting for engine progress'
+        self._active_forecast_serial = -1
         self._loading_plan_ui = False
+        # A factory default source is not proof that the user chose filaments.
+        # Persisted sources may automatically forecast once the actual library
+        # is loaded. Session confirmation is deliberately not written to disk.
+        self._filament_setup_confirmed = False
+        self._filament_options_ready = False
+        self._filament_load_error = ''
+        self._saved_filament_source = self.plan_preferences.saved.get('source')
         self.setObjectName("qtMainWindow")
         self.setWindowTitle("FullSpectrum Studio — Qt UI Preview")
         self.resize(1440, 880)
         self.setMinimumSize(920, 630)
         self._build()
         self._build_menus()
+        QTimer.singleShot(0, self._initialize_filament_setup)
         self.statusBar().showMessage(
-            "Qt Stage 4A — real read-only engine forecasts and project inspection; native 3MF export remains in Stage 4D."
+            "Qt Stage 4B — real read-only engine forecasts and project inspection; native 3MF export remains in Stage 4D."
         )
 
     def _build(self):
@@ -115,7 +137,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 4A", "badge"))
+        h.addWidget(_label("UI prototype · Stage 4B", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -153,7 +175,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(_label("MODEL PREVIEW", "smallTitle"))
         row.addStretch()
-        self.preview_mode = QComboBox()
+        self.preview_mode = WheelSafeComboBox()
         self.preview_mode.addItems(["Original", "Predicted", "Color Loss", "Wireframe"])
         self.preview_mode.setCurrentText("Original")
         self.preview_mode.setObjectName("previewMode")
@@ -288,8 +310,17 @@ class MainWindow(QMainWindow):
         self.results_panel = ResultsTab(self.tabs)
         self.tabs.addTab(self.results_panel, "Results")
         self.filaments_panel.activity_event.connect(self._filament_activity)
+        self.filaments_panel.planning_changed.connect(self._filament_planning_changed)
         self.filaments_panel.source_color_selected.connect(self._filament_color_selected)
         self.filaments_panel.protections_changed.connect(self._protections_updated)
+        self.confirm_filaments_tab_button = QPushButton('Use These Filaments for Forecast')
+        self.confirm_filaments_tab_button.setObjectName('confirmFilamentsTab')
+        self.confirm_filaments_tab_button.clicked.connect(self._confirm_filament_setup)
+        filament_layout = self.filaments_panel.content.layout()
+        filament_layout.insertWidget(
+            filament_layout.indexOf(self.filaments_panel.selection_hint) + 1,
+            self.confirm_filaments_tab_button)
+        self.confirm_filaments_tab_button.setVisible(False)
         self._refresh_results_context()
         outer.addWidget(self.tabs)
         return sidebar
@@ -303,7 +334,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _choice(items):
-        combo = QComboBox()
+        combo = WheelSafeComboBox()
         for text, value in items:
             combo.addItem(text, value)
         return combo
@@ -317,16 +348,18 @@ class MainWindow(QMainWindow):
     def _plan_tab(self):
         page = QWidget()
         col = _column(page, margins=(10, 15, 10, 12), spacing=11)
-        col.addWidget(_section_heading("Live Forecast"))
+        col.addWidget(help_heading("live_forecast", "LIVE FORECAST"))
         panel = self._section()
         stats = QHBoxLayout(panel)
         stats.setContentsMargins(14, 14, 14, 14)
-        self.accuracy = _label("—", "metricBig")
+        self.accuracy = RingGauge('Accuracy', '#66c797')
         self.accuracy.setObjectName('forecastAccuracy')
-        self.accuracy.setMinimumWidth(80)
-        stats.addWidget(self.accuracy)
+        self.confidence_gauge = RingGauge('Confidence', '#5fb8d0')
+        self.confidence_gauge.setObjectName('forecastConfidence')
+        stats.addWidget(self.accuracy,1)
+        stats.addWidget(self.confidence_gauge,1)
         detail = QVBoxLayout()
-        detail.setSpacing(7)
+        detail.setSpacing(9)
         self.forecast_metrics = {}
         for field in ("Confidence", "Worst match", "Palette"):
             line = QHBoxLayout()
@@ -336,7 +369,7 @@ class MainWindow(QMainWindow):
             self.forecast_metrics[field] = value
             line.addWidget(value)
             detail.addLayout(line)
-        stats.addLayout(detail, stretch=1)
+        stats.addLayout(detail, stretch=2)
         col.addWidget(panel)
         progress_row = QHBoxLayout()
         self.forecast_refresh = QPushButton('Refresh Forecast')
@@ -360,10 +393,41 @@ class MainWindow(QMainWindow):
         self.forecast_status.setObjectName('forecastStatus')
         self.forecast_status.setAccessibleName('Forecast status')
         col.addWidget(self.forecast_status)
+        self.filament_setup_banner = QFrame()
+        self.filament_setup_banner.setObjectName('filamentSetupBanner')
+        self.filament_setup_banner.setStyleSheet(
+            'QFrame#filamentSetupBanner {background: #17232b; border: 1px solid #3b6471; '
+            'border-radius: 7px;}'
+        )
+        setup_col = QVBoxLayout(self.filament_setup_banner)
+        setup_col.setContentsMargins(12, 10, 12, 10)
+        setup_col.setSpacing(8)
+        self.filament_setup_message = _label(
+            'Configure your available filaments before the first forecast.',
+            'helpText', wrap=True)
+        setup_col.addWidget(self.filament_setup_message)
+        actions = QHBoxLayout()
+        self.configure_filaments_button = QPushButton('Configure Filaments…')
+        self.configure_filaments_button.setObjectName('configureFilamentsFirstRun')
+        self.configure_filaments_button.clicked.connect(
+            lambda: self.tabs.setCurrentWidget(self.filaments_panel))
+        actions.addWidget(self.configure_filaments_button)
+        self.confirm_filaments_button = QPushButton('Use These Filaments')
+        self.confirm_filaments_button.setObjectName('confirmFilamentsFirstRun')
+        self.confirm_filaments_button.setEnabled(False)
+        self.confirm_filaments_button.clicked.connect(self._confirm_filament_setup)
+        actions.addWidget(self.confirm_filaments_button)
+        setup_col.addLayout(actions)
+        col.addWidget(self.filament_setup_banner)
+        self.filament_setup_ready_note = _label('', 'helpText', wrap=True)
+        self.filament_setup_ready_note.setObjectName('filamentSetupReadyNote')
+        self.filament_setup_ready_note.setStyleSheet('color: #77d3b3;')
+        self.filament_setup_ready_note.setVisible(False)
+        col.addWidget(self.filament_setup_ready_note)
         self.source_inspection = _label('Source: not inspected', 'bodyMuted', wrap=True)
         self.source_inspection.setObjectName('sourceInspection')
         col.addWidget(self.source_inspection)
-        col.addWidget(_section_heading("Expected Palette"))
+        col.addWidget(help_heading("expected_palette", "EXPECTED PALETTE"))
         forecast = self._section()
         inner = _column(forecast, margins=(12, 12, 12, 12), spacing=7)
         self.forecast_palette_label = _label('No forecast yet. Select Refresh Forecast to run the existing optimizer without exporting.', 'bodyMuted', wrap=True)
@@ -375,10 +439,31 @@ class MainWindow(QMainWindow):
         self.forecast_swatch_grid.setContentsMargins(0,0,0,0)
         self.forecast_swatch_grid.setSpacing(5)
         inner.addWidget(self.forecast_swatch_panel)
+        # Compact Mac-style comparison belongs with the expected palette,
+        # not as a second full-width banner above Refresh Forecast.
+        self.worst_match_panel = WorstMatchPanel()
+        inner.addWidget(self.worst_match_panel)
         self.forecast_warning = _label('', 'helpText', wrap=True)
         inner.addWidget(self.forecast_warning)
         col.addWidget(forecast)
-        col.addWidget(_section_heading("Color Optimization"))
+        # Stage 4B: inspect the engine-selected physical and mixed filament
+        # slots without adding a second optimizer or mutating existing pins.
+        self.details_toggle = QToolButton()
+        self.details_toggle.setObjectName('optimizationDetailsToggle')
+        self.details_toggle.setText('Optimization Details ▸')
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setEnabled(False)
+        self.details_toggle.toggled.connect(self._toggle_planning_details)
+        details_title_row = QHBoxLayout()
+        details_title_row.setSpacing(7)
+        details_title_row.addWidget(self.details_toggle)
+        details_title_row.addStretch()
+        col.addLayout(details_title_row)
+        self.planning_details_panel = PlanningDetailsPanel()
+        self.planning_details_panel.setVisible(False)
+        self.planning_details_panel.review_filament.connect(self._review_planned_filament)
+        col.addWidget(self.planning_details_panel)
+        col.addWidget(help_heading("color_optimization", "COLOR OPTIMIZATION"))
         col.addWidget(_label("Optimization strategy", "smallTitle"))
         self.palette_strategy = self._choice(PALETTE_STRATEGIES)
         self.palette_strategy.setObjectName("paletteStrategy")
@@ -399,7 +484,7 @@ class MainWindow(QMainWindow):
         col.addWidget(shortcut)
         col.addWidget(_label('Filament source and material selection are managed on the Filaments tab.',
                              'helpText', wrap=True))
-        col.addWidget(_section_heading("Native Project Template"))
+        col.addWidget(help_heading("native_project_template", "NATIVE PROJECT TEMPLATE"))
         template_row = QHBoxLayout()
         self.template_path = QLineEdit()
         self.template_path.setObjectName("nativeTemplatePath")
@@ -414,9 +499,6 @@ class MainWindow(QMainWindow):
         self.template_clear = QPushButton("Clear")
         self.template_clear.clicked.connect(self._clear_template)
         template_actions.addWidget(self.template_clear)
-        self.template_about = QPushButton("About Templates")
-        self.template_about.clicked.connect(self._about_templates)
-        template_actions.addWidget(self.template_about)
         template_actions.addStretch()
         col.addLayout(template_actions)
         self.template_status = _label("No native project template selected.", "templateStatus", wrap=True)
@@ -427,7 +509,12 @@ class MainWindow(QMainWindow):
         self.advanced_toggle.setText("Advanced Settings ▸")
         self.advanced_toggle.setCheckable(True)
         self.advanced_toggle.setObjectName("advancedToggle")
-        col.addWidget(self.advanced_toggle)
+        advanced_title_row = QHBoxLayout()
+        advanced_title_row.setSpacing(7)
+        advanced_title_row.addWidget(self.advanced_toggle)
+        advanced_title_row.addWidget(SectionHelpButton('advanced_settings'))
+        advanced_title_row.addStretch()
+        col.addLayout(advanced_title_row)
         self.advanced_panel = self._section()
         form = QFormLayout(self.advanced_panel)
         form.setContentsMargins(12, 12, 12, 12)
@@ -524,6 +611,43 @@ class MainWindow(QMainWindow):
         self._wire_plan_widgets()
         return self._scroll(page)
 
+    def _toggle_planning_details(self, checked):
+        self.planning_details_panel.setVisible(bool(checked))
+        self.details_toggle.setText('Optimization Details ▾' if checked else 'Optimization Details ▸')
+
+    def _review_planned_filament(self, key):
+        """Navigate to an existing physical option, never silently change pins."""
+        if not key:
+            return
+        self.tabs.setCurrentWidget(self.filaments_panel)
+        # First visit may still be loading the source-specific filament list.
+        # Complete the navigation after that worker returns.
+        if (self.filaments_panel._source_signature != self.filaments_panel._source_settings()
+                or getattr(self.filaments_panel, '_population_active', False)
+                or (not self.filaments_panel.options and self.filaments_panel._workers)):
+            self._pending_review_filament_key = key
+            self.results_panel.record_event('Planning details', 'Waiting for filament colors to load…', 'info')
+            return
+        match = next((option for option in self.filaments_panel.options
+                      if option.get('key') == key), None)
+        if match:
+            # The table already filters by name/series/HEX. This sets a useful
+            # search term but does not edit its enable/pin checkboxes.
+            self.filaments_panel.search.setText(str(match.get('name') or match.get('color') or ''))
+            for index, option in enumerate(self.filaments_panel.options):
+                if option.get('key') == key and not self.filaments_panel.filaments.isRowHidden(index):
+                    self.filaments_panel.filaments.selectRow(index)
+                    self.filaments_panel.filaments.scrollToItem(
+                        self.filaments_panel.filaments.item(index, 2))
+                    break
+            self.filaments_panel.search.setFocus()
+            self.results_panel.record_event('Planning details',
+                'Showing the chosen physical filament in the Filaments list.', 'info')
+        else:
+            self.filaments_panel.search.setText('')
+            self.results_panel.record_event('Planning details',
+                'Planned material is not in the currently loaded filament choices; check the source.', 'warning')
+
     def _toggle_advanced(self, checked):
         self.advanced_panel.setVisible(checked)
         self.advanced_toggle.setText("Advanced Settings ▾" if checked else "Advanced Settings ▸")
@@ -584,7 +708,11 @@ class MainWindow(QMainWindow):
     def _update_plan_value(self, field, value):
         if self._loading_plan_ui:
             return
-        self.plan_preferences.set(field, value)
+        changed = self.plan_preferences.set(field, value)
+        if changed and field in ('source', 'custom'):
+            self._filament_options_ready = False
+            self._filament_load_error = ''
+            self._filament_setup_confirmed = True  # Explicit user source choice.
         self._refresh_dependent_plan_widgets()
         self._update_plan_dirty_state()
         # Automatic forecasting is a scheduling preference, not a planner input.
@@ -593,7 +721,11 @@ class MainWindow(QMainWindow):
             # Changing the scheduling preference does not invalidate the
             # engine result. It only changes how an already-outdated forecast
             # is presented, and whether a refresh is queued.
-            if value and self.state.model_path and self._original_mesh is not None and (self._forecast_view.stale or not self._forecast_view.has_previous):
+            if (value and self.state.model_path and self._original_mesh is not None and
+                    # Stage 4A's lightweight behavior harness predates the
+                    # first-run gate. A real window always provides it.
+                    (not hasattr(self, '_filament_decision') or self._filament_decision().ready) and
+                    (self._forecast_view.stale or not self._forecast_view.has_previous)):
                 self._forecast_timer.start()
             elif not value:
                 self._forecast_timer.stop()
@@ -605,6 +737,9 @@ class MainWindow(QMainWindow):
         if field in ('auto_open', 'output_application', 'bambu_studio_executable', 'orcaslicer_executable'):
             return
         self._invalidate_forecast()
+        if changed and field in ('source', 'custom'):
+            self.filaments_panel.load_options()
+        self._refresh_filament_setup_ui()
 
     def _refresh_dependent_plan_widgets(self):
         strategy = self.palette_strategy.currentData()
@@ -731,29 +866,25 @@ class MainWindow(QMainWindow):
     def _clear_slicer_executable(self):
         self._update_plan_value(self._selected_slicer_executable_key(), "")
 
-    def _about_templates(self):
-        QMessageBox.information(self, "About Native Project Templates",
-            "Use a blank 3MF project saved from Bambu Studio or OrcaSlicer.\n\n"
-            "1. Select the correct printer, nozzle, build plate, and process.\n"
-            "2. Configure the intended physical filament presets.\n"
-            "3. Remove every model and save the empty project as a .3mf.\n"
-            "4. Select that file as the native project template here.\n\n"
-            "The template preserves slicer-specific profiles; the filament library controls"
-            " color choices. Neither file is modified when selected.")
-
     def _save_plan_settings(self):
         try:
             target = self.plan_preferences.save()
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Unable to Save Settings", str(exc))
             return
+        self._saved_filament_source = self.plan_preferences.saved.get('source')
         self._update_plan_dirty_state()
+        self._refresh_filament_setup_ui()
         self.statusBar().showMessage("Plan settings saved to the existing FullSpectrum preferences file.")
         self.results_panel.record_event('Plan settings', 'Preferences saved successfully.', 'success')
         self._refresh_results_context()
 
     def _revert_plan_settings(self):
         self.plan_preferences.revert()
+        self._saved_filament_source = self.plan_preferences.saved.get('source')
+        self._filament_setup_confirmed = False
+        self._filament_options_ready = False
+        self._filament_load_error = ''
         self._restore_plan_widgets()
         self.filaments_panel.load_options()
         self.statusBar().showMessage("Plan edits discarded; settings reloaded from disk.")
@@ -771,11 +902,105 @@ class MainWindow(QMainWindow):
             self.plan_preferences.is_dirty,
         )
 
+    def _filament_decision(self):
+        return evaluate_setup(
+            source=self.plan_preferences.get('source'),
+            custom_path=self.plan_preferences.get('custom'),
+            saved_source=self._saved_filament_source,
+            confirmed=self._filament_setup_confirmed,
+            loaded=self._filament_options_ready,
+            options=self.filaments_panel.options,
+            disabled=self.filaments_panel.preferences.disabled,
+            selection_valid=getattr(self.filaments_panel, 'selection_is_valid', True),
+            selection_error=getattr(self.filaments_panel, 'selection_error', ''),
+        )
+
+    def _initialize_filament_setup(self):
+        # Returning users should not need to open Filaments manually, but the
+        # source must finish loading before any forecast starts.
+        if self._saved_filament_source:
+            self.filaments_panel.load_options()
+        self._refresh_filament_setup_ui()
+
+    def _refresh_filament_setup_ui(self):
+        decision = self._filament_decision()
+        need_setup = not decision.ready
+        self.filament_setup_banner.setVisible(need_setup)
+        self.filament_setup_ready_note.setVisible(not need_setup)
+        if not need_setup:
+            origin = ('saved configuration' if not self._filament_setup_confirmed
+                      else 'current session')
+            self.filament_setup_ready_note.setText(f'Filaments ready · {origin}')
+        message = (self._filament_load_error if decision.state == 'loading' and
+                   self._filament_load_error else decision.message)
+        self.filament_setup_message.setText(message)
+        self.confirm_filaments_button.setEnabled(decision.can_confirm)
+        # Also provide a one-click confirmation on the Filaments tab itself.
+        self.confirm_filaments_tab_button.setVisible(need_setup)
+        self.confirm_filaments_tab_button.setEnabled(decision.can_confirm)
+        self.confirm_filaments_tab_button.setToolTip(decision.message)
+        if need_setup:
+            self._forecast_timer.stop()
+            if self._forecast_task is None:
+                self.forecast_refresh.setEnabled(False)
+            self._set_forecast_status(message, 'normal')
+        elif self._forecast_task is None:
+            self.forecast_refresh.setEnabled(bool(self.state.model_path))
+            if not self.state.model_path:
+                self._set_forecast_status('Filaments ready. Open a model to begin forecasting.')
+        return decision
+
+    def _confirm_filament_setup(self):
+        decision = self._filament_decision()
+        if not decision.can_confirm:
+            self._refresh_filament_setup_ui()
+            return
+        self._filament_setup_confirmed = True
+        self._refresh_filament_setup_ui()
+        self.results_panel.record_event(
+            'Filament setup', 'Current filament selection confirmed for this session.', 'success')
+        if self.state.model_path and self._original_mesh is not None:
+            self._invalidate_forecast()
+        elif not self.state.model_path:
+            self._set_forecast_status('Filaments ready. Open a model to begin forecasting.')
+
+    def _filament_planning_changed(self, valid):
+        # A valid user checkbox edit is intentional configuration for this session.
+        if valid and self._filament_options_ready:
+            self._filament_setup_confirmed = True
+        # A pin/enable click is a planning change, not just a Save event.
+        # This uses the same debounce as Plan controls. No save to disk.
+        self._invalidate_forecast()
+        if not valid:
+            self._forecast_timer.stop()
+            self._forecast_pending = False
+            reason = self.filaments_panel.selection_error or 'Correct the filament selection.'
+            self._set_forecast_status('Filament selection unavailable: ' + reason, 'error')
+        self._refresh_filament_setup_ui()
+
     def _filament_activity(self, severity, title, message):
         self.results_panel.record_event(title, message, severity)
         self.statusBar().showMessage(message)
-        if (title in ('Filaments', 'Protected colors') and severity in ('success', 'info')) or (title == 'Filament source' and severity == 'success'):
+        if title == 'Filament source':
+            self._filament_options_ready = (severity == 'success' or
+                (severity == 'info' and self.plan_preferences.get('source') == 'exact-cmykw'))
+            self._filament_load_error = (message if severity == 'warning' else '')
+            decision = self._refresh_filament_setup_ui()
+            if (decision.ready and self.auto_forecast.isChecked() and
+                    self.state.model_path and self._original_mesh is not None and
+                    (self._forecast_view.stale or not self._forecast_view.has_previous)):
+                self._forecast_timer.start()
+        elif title == 'Filaments' and severity == 'success':
+            self._filament_setup_confirmed = True
+            self._refresh_filament_setup_ui()
+        if title in ('Filaments', 'Protected colors') and severity in ('success', 'info'):
             self._invalidate_forecast()
+        # Loading the same filament source is not itself a settings edit and
+        # must not invalidate the forecast merely because a tab was opened.
+        if title == 'Filament source' and severity == 'success' and self._pending_review_filament_key:
+            key = self._pending_review_filament_key
+            self._pending_review_filament_key = None
+            QTimer.singleShot(0, lambda k=key: self._review_planned_filament(k))
 
     def _open_existing_report(self):
         self.tabs.setCurrentWidget(self.results_panel)
@@ -842,6 +1067,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # Let any 3MF/inventory reads finish so Qt never destroys a live QThread.
         self._forecast_timer.stop()
+        self._forecast_heartbeat.stop()
         if self._forecast_task is not None:
             self._forecast_task.requestInterruption()
         for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + ([self._forecast_task] if self._forecast_task is not None else []):
@@ -855,6 +1081,7 @@ class MainWindow(QMainWindow):
             return
         name = display_filename(path)
         self.project_subtitle.setText(name)
+        self._pending_review_filament_key = None
         self.filaments_panel.set_model(path)
         self.bottom_hint.setText(f"Selected: {name} — loading preview geometry (original files are unchanged).")
         self.statusBar().showMessage("Loading 3D model geometry…")
@@ -945,8 +1172,9 @@ class MainWindow(QMainWindow):
         self.results_panel.record_event('Model preview', info, 'success')
         self.source_inspection.setText(f'Source geometry: {mesh.source_triangles:,} triangles; inspecting project metadata…')
         self._start_inspection(path)
-        if self.auto_forecast.isChecked():
+        if self.auto_forecast.isChecked() and self._filament_decision().ready:
             self._forecast_timer.start()
+        self._refresh_filament_setup_ui()
 
     # Stage 4A: no 3MF export; all engine operations run on QThreads.
     def _set_forecast_status(self, message, severity='normal'):
@@ -972,17 +1200,26 @@ class MainWindow(QMainWindow):
         return True
 
     def _present_forecast_pending(self):
-        """One actionable message for manual mode; no stale warning in auto mode."""
+        """Retain stale palette context even if first-run setup blocks replanning."""
         automatic = self.auto_forecast.isChecked()
-        if self._show_previous_forecast():
+        # Update the visible palette label before checking the first-run gate.
+        # A setup-required state blocks an engine run, but must not prevent
+        # same-model previous results from being identified as outdated.
+        showing_previous = self._show_previous_forecast()
+        if not showing_previous:
+            self.forecast_palette_label.setText('No forecast yet')
+            self.forecast_palette_label.setStyleSheet('')
+        if getattr(self, '_filament_setup_confirmed', None) is not None:
+            decision = self._filament_decision()
+            if not decision.ready:
+                return self._set_forecast_status(decision.message)
+        if showing_previous:
             if automatic:
                 self._set_forecast_status('Updating forecast automatically…', 'busy')
             else:
                 self._set_forecast_status(
                     'Previous forecast is outdated — select Refresh Forecast to update.', 'stale')
             return
-        self.forecast_palette_label.setText('No forecast yet')
-        self.forecast_palette_label.setStyleSheet('')
         if automatic:
             if self.state.model_path and self._original_mesh is not None:
                 self._set_forecast_status('Updating forecast automatically…', 'busy')
@@ -998,6 +1235,8 @@ class MainWindow(QMainWindow):
     def _invalidate_forecast(self, clear_inspection=False):
         self._forecast_serial += 1
         self._forecast_timer.stop()
+        if getattr(self, '_forecast_heartbeat', None) is not None:
+            self._forecast_heartbeat.stop()
         self._forecast_pending = False
         if self._forecast_task is not None:
             self._forecast_task.requestInterruption()
@@ -1006,8 +1245,40 @@ class MainWindow(QMainWindow):
             self._forecast_view.reset(self.state.model_path)
         else:
             self._forecast_view.invalidate()
+        # Earlier Stage 4A tests exercise this method on a lightweight
+        # BehaviorHarness without Stage 4B widgets. Those details are optional
+        # presentation, not a prerequisite for invalidating a forecast.
+        details = getattr(self, 'planning_details_panel', None)
+        toggle = getattr(self, 'details_toggle', None)
+        if clear_inspection:
+            if details is not None:
+                self.planning_details_panel.clear_result()
+            if toggle is not None:
+                self.details_toggle.setChecked(False)
+                self.details_toggle.setEnabled(False)
+        elif self._forecast_view.has_previous:
+            if details is not None:
+                if self.auto_forecast.isChecked():
+                    self.planning_details_panel.set_stale(True, updating=True)
+                else:
+                    self.planning_details_panel.set_stale(True)
+        else:
+            if details is not None:
+                self.planning_details_panel.clear_result()
+            if toggle is not None:
+                toggle.setEnabled(False)
         if not self._forecast_view.has_previous:
-            self.accuracy.setText('—')
+            # Stage 4A tests embed these methods in a small label-only
+            # behavior harness. Keep that contract without replacing the
+            # production RingGauge widgets or their values.
+            if hasattr(self.accuracy, 'set_value'):
+                self.accuracy.set_value(None)
+            else:
+                self.accuracy.setText('—')
+            if hasattr(self, 'confidence_gauge'):
+                self.confidence_gauge.set_value(None)
+            if hasattr(self, 'worst_match_panel'):
+                self.worst_match_panel.set_forecast(None)
             for value in self.forecast_metrics.values():
                 value.setText('—')
             self._render_forecast_palette([])
@@ -1019,9 +1290,13 @@ class MainWindow(QMainWindow):
         if clear_inspection:
             self._inspection_serial += 1
             self.source_inspection.setText('Source: not inspected')
-        if (self.auto_forecast.isChecked() and bool(self.state.model_path)
+        allowed = (not hasattr(self, '_filament_setup_confirmed') or
+                   self._filament_decision().ready)
+        if (allowed and self.auto_forecast.isChecked() and bool(self.state.model_path)
                 and self._original_mesh is not None):
             self._forecast_timer.start()
+        if hasattr(self, 'filament_setup_banner'):
+            self._refresh_filament_setup_ui()
 
     def _start_inspection(self, path):
         if not Path(path).is_file():
@@ -1055,9 +1330,21 @@ class MainWindow(QMainWindow):
             self.results_panel.record_event('Model inspection', label, 'success')
 
     def _request_forecast(self):
+        decision = self._filament_decision()
+        if not decision.ready:
+            self._forecast_timer.stop()
+            self._refresh_filament_setup_ui()
+            return
         path = self.state.model_path
         if not path or not Path(path).is_file():
             self._set_forecast_status('Choose a model before running a forecast.')
+            return
+        if not getattr(self.filaments_panel, 'selection_is_valid', True):
+            self._forecast_timer.stop()
+            self._set_forecast_status(
+                'Filament selection unavailable: ' +
+                (self.filaments_panel.selection_error or 'Correct the filament selection.'),
+                'error')
             return
         if self._forecast_task is not None:
             self._forecast_pending = True
@@ -1073,6 +1360,10 @@ class MainWindow(QMainWindow):
         self.forecast_cancel.setEnabled(True)
         self.forecast_progress.setValue(0)
         self.forecast_progress.setVisible(True)
+        self._forecast_started_at = time.monotonic()
+        self._active_forecast_serial = serial
+        self._forecast_last_stage = 'Preparing palette planning'
+        self._forecast_heartbeat.start()
         self._set_forecast_status('Running the existing FullSpectrum palette planner…', 'busy')
         self.results_panel.record_event('Live forecast', 'Read-only engine preview started.', 'busy')
         thread.progress_changed.connect(lambda fraction, message, s=serial: self._forecast_progress_changed(s, fraction, message))
@@ -1082,6 +1373,7 @@ class MainWindow(QMainWindow):
 
     def _cancel_forecast(self):
         self._forecast_serial += 1
+        self._forecast_heartbeat.stop()
         self._forecast_pending = False
         self._forecast_timer.stop()
         if self._forecast_task is not None:
@@ -1089,17 +1381,37 @@ class MainWindow(QMainWindow):
         self.forecast_cancel.setEnabled(False)
         self._set_forecast_status('Cancellation requested (at the next engine progress checkpoint).', 'stale')
 
+    def _update_forecast_elapsed(self):
+        if (self._active_forecast_serial != self._forecast_serial or
+                self._forecast_task is None or not self._forecast_task.isRunning()):
+            self._forecast_heartbeat.stop()
+            return
+        if self._forecast_started_at <= 0:
+            return
+        elapsed = int(max(0, time.monotonic() - self._forecast_started_at))
+        self._set_forecast_status(
+            f'Planning · {elapsed // 60:d}:{elapsed % 60:02d} elapsed · '
+            f'{self._forecast_last_stage}', 'busy'
+        )
+
     def _forecast_progress_changed(self, serial, fraction, message):
         if serial != self._forecast_serial:
             return
         self.forecast_progress.setValue(min(100,max(0,int(100*fraction))))
-        self._set_forecast_status(str(message), 'busy')
+        self._forecast_last_stage = str(message)
+        self._update_forecast_elapsed()
 
     def _forecast_done(self, serial, result, error):
         if serial != self._forecast_serial:
             return  # Stale model/settings result must never update the UI.
+        if getattr(self, '_forecast_heartbeat', None) is not None:
+            self._forecast_heartbeat.stop()
         if error:
             self._forecast_view.invalidate()
+            if self._forecast_view.has_previous:
+                details = getattr(self, 'planning_details_panel', None)
+                if details is not None:
+                    details.set_stale(True)
             if not self._show_previous_forecast():
                 self.forecast_palette_label.setText('No forecast yet')
                 self.forecast_palette_label.setStyleSheet('')
@@ -1108,8 +1420,14 @@ class MainWindow(QMainWindow):
             return
         if not self._forecast_view.accept(self.state.model_path, result):
             return  # Do not reuse a forecast for another model.
+        # Engine result is already fully computed on a worker thread; update
+        # read-only detail tables on Qt's owning GUI thread only.
+        self.planning_details_panel.set_result(result.get('planningDetails') or {})
+        self.details_toggle.setEnabled(True)
         forecast = result['forecast']
-        self.accuracy.setText(f"{forecast['accuracy']:.0f}%")
+        self.accuracy.set_value(forecast['accuracy'])
+        self.confidence_gauge.set_value(forecast['confidence'])
+        self.worst_match_panel.set_forecast(forecast)
         self.forecast_metrics['Confidence'].setText(f"{forecast['confidence']:.0f}%")
         self.forecast_metrics['Worst match'].setText(f"dE {forecast['maximumDeltaE']:.1f}")
         self.forecast_metrics['Palette'].setText(forecast['slotSummary'])
@@ -1125,6 +1443,7 @@ class MainWindow(QMainWindow):
 
     def _release_forecast(self, thread):
         if self._forecast_task is thread:
+            self._forecast_heartbeat.stop()
             self._forecast_task = None
         self.forecast_progress.setVisible(False)
         self.forecast_cancel.setEnabled(False)

@@ -1,7 +1,7 @@
 """Results and activity workspace for the pre-conversion Qt desktop shell.
 
 This is read-only: users may view existing conversion/validation reports, but
-Stage 2C does not invoke the optimizer, export 3MF, or claim print validation.
+Stage 4B forecasts palettes but does not export 3MF or claim print validation.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class ResultsTab(QWidget):
         self.setObjectName('resultsTab')
         self._build()
         self.set_context('', '', 'Bambu Studio', False)
-        self.record_event('Ready', 'Stage 2C interface initialized. No conversion has run.', 'info')
+        self.record_event('Ready', 'Stage 4B session initialized. No conversion has run.', 'info')
 
     def _build(self):
         outer = QVBoxLayout(self)
@@ -56,15 +56,15 @@ class ResultsTab(QWidget):
 
         layout.addWidget(_text('CURRENT SESSION', 'sectionTitle'))
         heading = QHBoxLayout()
-        self.phase_label = _text('Configuration only', 'resultsStatus')
+        self.phase_label = _text('Forecasting available · export inactive', 'resultsStatus')
         self.phase_label.setStyleSheet('color: #89d9c3; font-weight: 600;')
         heading.addWidget(self.phase_label)
         heading.addStretch()
-        self.stage_label = _text('Stage 2C', 'helpText')
+        self.stage_label = _text('Stage 4B', 'helpText')
         heading.addWidget(self.stage_label)
         layout.addLayout(heading)
-        layout.addWidget(_text('The Qt frontend cannot compose or validate a 3MF yet. '
-                               'Saved preferences and existing reports can be inspected here.',
+        layout.addWidget(_text('Palette forecasts run from Plan. Native 3MF composition and validation '
+                               'are not available in this Qt stage.',
                                'bodyMuted'))
 
         details = QFrame()
@@ -148,8 +148,8 @@ class ResultsTab(QWidget):
         self.report_view.setPlaceholderText('Select an existing report to read it here.')
         self.report_view.setMinimumHeight(220)
         layout.addWidget(self.report_view)
-        layout.addWidget(_text('Native 3MF export, slicer launch, live forecasts, and '
-                               'conversion progress will be connected in Stage 4.', 'helpText'))
+        layout.addWidget(_text('Native 3MF export, slicer launch and conversion progress remain for Stage 4D. '
+                               'Live forecasts are available on Plan.', 'helpText'))
         layout.addStretch(1)
 
     def set_context(self, model_path, template_path, slicer, dirty=False):
