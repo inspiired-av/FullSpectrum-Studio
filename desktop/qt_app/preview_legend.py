@@ -5,8 +5,8 @@ this widget never calculates ΔE, modifies meshes, or writes files.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QEvent
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy
+from PySide6.QtCore import Qt, QEvent, Signal
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy, QPushButton, QComboBox, QGridLayout, QScrollArea
 
 
 class ColorLossLegend(QFrame):
@@ -82,37 +82,96 @@ class ColorLossLegend(QFrame):
 
 
 class AnchorInfluenceLegend(QFrame):
-    """Compact, noninteractive lower-left 3D viewport legend."""
+    """Interactive lower-left GPU influence legend: dominant physical-color default.
+
+    Categorical overlay colors are optional. Clicking a physical anchor shows
+    its recipe share (0–100%) in ALL regions, even when a minority component.
+    """
+    anchor_selected = Signal(int)
+    palette_mode_changed = Signal(str)
 
     def __init__(self, viewport):
         super().__init__(viewport)
-        from PySide6.QtWidgets import QGridLayout
         self.setObjectName('anchorInfluenceLegend')
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setStyleSheet(
             'QFrame#anchorInfluenceLegend {background: rgba(15,21,29,238); '
             'border: 1px solid #465361; border-radius: 9px;}'
             'QLabel#anchorLegendTitle {color: #eef4f8; font-size: 11px; font-weight: 700; border: none;}'
-            'QLabel#anchorLegendName {color: #e2eaf0; font-size: 10px; border: none;}'
             'QLabel#anchorLegendNote {color: #a5bac7; font-size: 9px; border: none;}'
+            'QPushButton#anchorLegendChoice {background: transparent; border: 1px solid transparent; '
+            'text-align: left; padding: 2px; color: #e2eaf0; font-size: 10px;}'
+            'QPushButton#anchorLegendChoice:checked {border: 1px solid #72d8ed; '
+            'background: #244752; border-radius: 4px;}'
         )
-        self.rows = ()
-        self._columns = 1
-        self._labels = []
-        layout = QVBoxLayout(self)
+        self.rows=()
+        self._labels=[]
+        self._columns=1
+        self.selected_slot=0
+        self.color_mode='physical'
+        layout=QVBoxLayout(self)
         layout.setContentsMargins(11,8,11,8)
-        layout.setSpacing(5)
+        layout.setSpacing(4)
+        heading=QHBoxLayout()
         title=QLabel('ANCHOR INFLUENCE  ·  PHYSICAL SLOTS')
         title.setObjectName('anchorLegendTitle')
-        layout.addWidget(title)
-        self._grid=QGridLayout()
+        title.setMinimumWidth(0)
+        self._title=title
+        heading.addWidget(title,1)
+        self.display=QComboBox(self)
+        self.display.setObjectName('anchorDisplayMode')
+        self.display.addItem('Physical colors', 'physical')
+        self.display.addItem('Distinct colors', 'categorical')
+        self.display.setToolTip('Physical colors are the actual dominant filaments. Distinct colors provide contrast.')
+        self.display.setFixedWidth(124)
+        self.display.currentIndexChanged.connect(self._display_changed)
+        heading.addWidget(self.display)
+        layout.addLayout(heading)
+        # The legend must fit a short viewport while still allowing access to
+        # every anchor, including when the contribution gradient is expanded.
+        self._grid_scroll=QScrollArea(self)
+        self._grid_scroll.setObjectName('anchorLegendScroll')
+        self._grid_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._grid_scroll.setWidgetResizable(True)
+        self._grid_scroll.setMinimumHeight(0)
+        self._grid_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self._grid_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._grid_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._grid_scroll.setStyleSheet(
+            'QScrollArea#anchorLegendScroll {background: transparent; border: none;}'
+            'QScrollArea#anchorLegendScroll > QWidget > QWidget {background: transparent;}')
+        self._grid_content=QWidget(self._grid_scroll)
+        self._grid=QGridLayout(self._grid_content)
         self._grid.setContentsMargins(0,0,0,0)
-        self._grid.setHorizontalSpacing(12)
+        self._grid.setHorizontalSpacing(9)
         self._grid.setVerticalSpacing(3)
-        layout.addLayout(self._grid)
-        self._note=QLabel('Overlay → filament  ·  MIX uses first recipe component')
+        self._grid_scroll.setWidget(self._grid_content)
+        self._grid_scroll.viewport().setAutoFillBackground(False)
+        self._grid_content.setAutoFillBackground(False)
+        layout.addWidget(self._grid_scroll,1)
+        self._note=QLabel('Click a filament for its contribution (0–100%)')
         self._note.setObjectName('anchorLegendNote')
         layout.addWidget(self._note)
+        self._gradient=QWidget(self)
+        gradient=QVBoxLayout(self._gradient)
+        gradient.setContentsMargins(0,0,0,0)
+        gradient.setSpacing(3)
+        bar=QFrame(self._gradient)
+        bar.setFixedHeight(9)
+        bar.setStyleSheet('QFrame {background: qlineargradient(x1:0,y1:0,x2:1,y2:0, '
+                          'stop:0 #1C2938, stop:0.5 #27818F, stop:1 #30DDF5); '
+                          'border: none; border-radius: 3px;}')
+        gradient.addWidget(bar)
+        ticks=QHBoxLayout()
+        for index,text in enumerate(('0%','50%','100%')):
+            tick=QLabel(text)
+            tick.setObjectName('anchorLegendNote')
+            ticks.addWidget(tick,1)
+            tick.setAlignment((Qt.AlignmentFlag.AlignLeft if index==0 else
+                               Qt.AlignmentFlag.AlignRight if index==2 else
+                               Qt.AlignmentFlag.AlignCenter))
+        gradient.addLayout(ticks)
+        layout.addWidget(self._gradient)
+        self._gradient.hide()
         self.setFixedSize(390,60)
         viewport.installEventFilter(self)
         self.position_over_viewport()
@@ -121,15 +180,50 @@ class AnchorInfluenceLegend(QFrame):
     def has_rows(self):
         return bool(self.rows)
 
+    def _display_changed(self,index):
+        mode=self.display.itemData(index)
+        if mode not in ('physical','categorical') or mode==self.color_mode:
+            return
+        self.color_mode=mode
+        self._restyle_chips()
+        self.palette_mode_changed.emit(mode)
+
+    def _restyle_chips(self):
+        for chip, row in self._chips:
+            color=row['filament'] if self.color_mode=='physical' else row['overlay']
+            chip.setStyleSheet(f'QFrame#anchorLegendSwatch {{background-color: {color}; '
+                               f'border: 1px solid #8b9aa8; border-radius: 3px;}}')
+            chip.setToolTip('Physical filament' if self.color_mode=='physical' else 'High-contrast category')
+
+    def _choose(self,slot):
+        self.selected_slot = 0 if self.selected_slot==slot else slot
+        for button,record in self._buttons:
+            button.setChecked(record['slot']==self.selected_slot)
+        self._gradient.setVisible(self.selected_slot > 0)
+        if self.selected_slot:
+            name=next(row['name'] for row in self.rows if row['slot']==self.selected_slot)
+            self._note.setText(f'Slot {self.selected_slot} · recipe share, not filament consumption')
+        else:
+            self._note.setText('Click a filament for its contribution (0–100%)')
+        self._update_size()
+        self.position_over_viewport()
+        self.anchor_selected.emit(self.selected_slot)
+
     def set_rows(self, rows):
-        self.rows = tuple(rows or ())
+        self.rows=tuple(rows or ())
+        self.selected_slot=0
+        self._gradient.hide()
+        self._note.setText('Click a filament for its contribution (0–100%)')
         self._build_rows()
         self.position_over_viewport()
 
     def _columns_needed(self):
         parent=self.parentWidget()
-        return (2 if parent and len(self.rows)>2 and parent.width()>=380 and
-                62+len(self.rows)*23 > parent.height()-24 else 1)
+        # Prefer two columns before the legend would exceed its viewport.
+        # Include the optional contribution scale in that decision.
+        natural_height=72+len(self.rows)*26+(32 if self.selected_slot else 0)
+        return 2 if (parent and len(self.rows)>2 and parent.width()>=380 and
+                     natural_height > parent.height()-24) else 1
 
     def _build_rows(self):
         while self._grid.count():
@@ -137,50 +231,55 @@ class AnchorInfluenceLegend(QFrame):
             if item.widget():
                 item.widget().hide()
                 item.widget().deleteLater()
-        self._labels=[]
+        self._buttons=[]
+        self._chips=[]
         self._columns=self._columns_needed()
         nrows=(len(self.rows)+self._columns-1)//self._columns
-        for index,row in enumerate(self.rows):
+        for index,record in enumerate(self.rows):
             cell=QWidget(self)
             contents=QHBoxLayout(cell)
             contents.setContentsMargins(0,0,0,0)
             contents.setSpacing(5)
-            for kind,color in (('Overlay',row['overlay']),('Filament',row['filament'])):
-                chip=QFrame(cell)
-                chip.setObjectName('anchorLegendSwatch')
-                chip.setFixedSize(14,14)
-                chip.setStyleSheet('QFrame#anchorLegendSwatch {background-color: '+color+
-                                   '; border: 1px solid #8b9aa8; border-radius: 3px;}')
-                chip.setAccessibleName(f"{kind} color for slot {row['slot']}: {color}")
-                contents.addWidget(chip)
-            label=QLabel(cell)
-            label.setObjectName('anchorLegendName')
-            full=f"{row['slot']} · {row['name']}"+('  (Pinned)' if row['pinned'] else '')
-            label.setToolTip(full)
-            label.setAccessibleName(full)
-            contents.addWidget(label,1)
-            self._labels.append((label,full))
-            column=index//nrows if nrows else 0
-            line=index%nrows if nrows else 0
-            self._grid.addWidget(cell,line,column)
-        self._note.setText('Overlay colors repeat after six anchors  ·  First MIX component'
-                           if len(self.rows)>6 else
-                           'Overlay → actual filament  ·  MIX uses first recipe component')
+            chip=QFrame(cell)
+            chip.setObjectName('anchorLegendSwatch')
+            chip.setFixedSize(13,13)
+            contents.addWidget(chip)
+            self._chips.append((chip,record))
+            button=QPushButton(cell)
+            button.setObjectName('anchorLegendChoice')
+            button.setCheckable(True)
+            button.setChecked(record['slot']==self.selected_slot)
+            full=f"{record['slot']} · {record['name']}"+('  (Pinned)' if record['pinned'] else '')
+            button.setText(full)
+            button.setToolTip(full+' · click to show percentage contribution')
+            button.setAccessibleName(full)
+            button.clicked.connect(lambda checked=False,slot=record['slot']:self._choose(slot))
+            contents.addWidget(button,1)
+            self._buttons.append((button,record))
+            self._grid.addWidget(cell,index%nrows if nrows else 0,index//nrows if nrows else 0)
+        self._restyle_chips()
         self._update_size()
 
     def _update_size(self):
         parent=self.parentWidget()
-        if not parent:return
-        width=min(max(230,parent.width()-24),440 if self._columns==1 else 530)
-        height=59+((len(self.rows)+self._columns-1)//self._columns)*23
+        if parent is None:return
+        width=min(max(1,parent.width()-24),460 if self._columns==1 else 590)
+        natural_height=72+((len(self.rows)+self._columns-1)//self._columns)*26
+        if self.selected_slot: natural_height+=32
+        # Never extend beyond the viewport. The scroll area keeps omitted
+        # rows accessible rather than cropping them behind the model.
+        height=min(natural_height,max(1,parent.height()-24))
         self.setFixedSize(width,height)
-        name_width=max(20,(width-40)//self._columns-42)
-        for label,full in self._labels:
-            label.setText(label.fontMetrics().elidedText(full,Qt.TextElideMode.ElideRight,name_width))
+        self._title.setText('ANCHOR INFLUENCE' if width<380 else
+                            'ANCHOR INFLUENCE  ·  PHYSICAL SLOTS')
+        text_width=max(45,(width-38)//self._columns-42)
+        for button,record in self._buttons:
+            full=f"{record['slot']} · {record['name']}"+('  (Pinned)' if record['pinned'] else '')
+            button.setText(button.fontMetrics().elidedText(full,Qt.TextElideMode.ElideRight,text_width))
 
     def position_over_viewport(self,size=None):
         parent=self.parentWidget()
-        if not parent:return
+        if parent is None:return
         if self.rows:
             if self._columns_needed()!=self._columns:
                 self._build_rows()

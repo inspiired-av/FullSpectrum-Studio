@@ -21,7 +21,8 @@ class EncodingAndStageLabelTests(unittest.TestCase):
     def test_stage_3c_label_tracks_installed_features(self):
         path = Path(__file__).resolve().parents[1] / 'desktop/qt_app/main_window.py'
         content = path.read_text(encoding='utf-8')
-        match = re.search(r'UI prototype · Stage (\d+)([A-Z])', content)
+        # Lettered subphases (4D-A, 4D-B, etc.) are real stage labels.
+        match = re.search(r'UI prototype · Stage (\d+)([A-Z](?:-[A-Z])?)', content)
         self.assertIsNotNone(match, 'Missing Qt development-stage badge')
         stage = (int(match.group(1)), match.group(2))
         self.assertGreaterEqual(stage, (3, 'C'))

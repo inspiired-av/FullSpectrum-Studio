@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self._predicted_filename = ""
         self._live_preview_meshes = {}
         self._live_preview_stale = False
+        self._influence_data = None
         self._use_external_predicted = False
         self.plan_preferences = PlanPreferences(settings_path)
         self._forecast_view = ForecastViewState()  # Current model only; never saved to disk.
@@ -117,7 +118,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         QTimer.singleShot(0, self._initialize_filament_setup)
         self.statusBar().showMessage(
-            "Qt Stage 4C — read-only predicted 3D and color-loss visualization; native 3MF export remains in Stage 4D."
+            "Qt Stage 4D-A — dominant physical anchors and interactive recipe contributions; native 3MF export is not active."
         )
 
     def _build(self):
@@ -142,7 +143,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 4C", "badge"))
+        h.addWidget(_label("UI prototype · Stage 4D-A", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -225,6 +226,8 @@ class MainWindow(QMainWindow):
         self.preview_legend = ColorLossLegend(self.preview_surface)
         self.preview_legend.setVisible(False)
         self.anchor_legend = AnchorInfluenceLegend(self.preview_surface)
+        self.anchor_legend.anchor_selected.connect(self._anchor_selected)
+        self.anchor_legend.palette_mode_changed.connect(self._anchor_palette_changed)
         self.anchor_legend.setVisible(False)
         self.preview_splitter.addWidget(model_area)
 
@@ -1688,7 +1691,7 @@ class MainWindow(QMainWindow):
         availability = {
             'Predicted': bool(self._live_preview_meshes.get('predicted') or self._predicted_mesh),
             'Color Loss': bool(self._live_preview_meshes.get('loss')),
-            'Anchor Influence': bool(self._live_preview_meshes.get('influence')),
+            'Anchor Influence': bool(self._live_preview_meshes.get('influence') and self._influence_data),
         }
         for index in range(self.preview_mode.count()):
             name = self.preview_mode.itemText(index)
@@ -1699,6 +1702,8 @@ class MainWindow(QMainWindow):
     def _clear_live_preview(self):
         self._live_preview_meshes = {}
         self._live_preview_stale = False
+        self._influence_data = None
+        self.preview_surface.set_influence_analysis(None)
         self._use_external_predicted = False
         if not hasattr(self, 'preview_mode'):
             return
@@ -1713,6 +1718,7 @@ class MainWindow(QMainWindow):
         if not self._live_preview_meshes:
             return
         self._live_preview_stale = True
+        self.anchor_legend.selected_slot = 0
         self.anchor_legend.setVisible(False)
         if hasattr(self, 'preview_mode') and self.preview_mode.currentText() in (
                 'Predicted', 'Color Loss', 'Anchor Influence'):
@@ -1723,7 +1729,9 @@ class MainWindow(QMainWindow):
         self._live_preview_meshes = dict(meshes)
         self._live_preview_stale = False
         self._use_external_predicted = False
-        self.anchor_legend.set_rows(anchor_legend_rows(result) if meshes.get('influence') else ())
+        self._influence_data = result.get('previewInfluence')
+        self.anchor_legend.set_rows(
+            anchor_legend_rows(result) if meshes.get('influence') and self._influence_data else ())
         self._refresh_preview_modes()
         if self.preview_mode.currentText() in ('Predicted', 'Color Loss', 'Anchor Influence'):
             if self.preview_mode.currentText() == 'Predicted' and not meshes.get('predicted') and self._predicted_mesh:
@@ -1787,6 +1795,8 @@ class MainWindow(QMainWindow):
                 target = self._predicted_mesh
             elif name == 'Predicted' and target is None:
                 target = self._predicted_mesh  # Historical manual OBJ inspection.
+            if name == 'Anchor Influence' and not self._influence_data:
+                target = None
             if target is None:
                 if self.preview_mode.currentText() != 'Original':
                     self.preview_mode.setCurrentText('Original')
@@ -1813,6 +1823,10 @@ class MainWindow(QMainWindow):
                 self.preview_status.setText(
                     f'{len(mesh.triangles):,} visible / {mesh.source_triangles:,} source triangles'
                     f'{suffix} · {name}')
+        self.preview_surface.set_influence_analysis(
+            self._influence_data if name == 'Anchor Influence' else None,
+            display=self.anchor_legend.color_mode,
+            selected=self.anchor_legend.selected_slot if not self._live_preview_stale else 0)
         self.preview_legend.setVisible(name == 'Color Loss' and 'loss' in meshes)
         self.anchor_legend.setVisible(
             name == 'Anchor Influence' and 'influence' in meshes
@@ -1822,6 +1836,22 @@ class MainWindow(QMainWindow):
         self.preview_surface.set_protected_overlay(
             self.tint_protected.isChecked() and name in ('Original', 'Wireframe'))
         self._update_preview_highlights()
+
+    def _anchor_selected(self, slot):
+        if self._live_preview_stale or self.preview_mode.currentText() != 'Anchor Influence':
+            return
+        if self._influence_data:
+            self.preview_surface.set_influence_analysis(
+                self._influence_data, display=self.anchor_legend.color_mode,
+                selected=slot)
+
+    def _anchor_palette_changed(self, mode):
+        if self._live_preview_stale or self.preview_mode.currentText() != 'Anchor Influence':
+            return
+        if self._influence_data:
+            self.preview_surface.set_influence_analysis(
+                self._influence_data, display=mode,
+                selected=self.anchor_legend.selected_slot)
 
     def _reset_camera(self):
         self.preview_surface.reset_camera()

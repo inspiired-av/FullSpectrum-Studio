@@ -1,7 +1,7 @@
 """Truthful mapping between the native optimizer's anchor categories and filaments.
 
-The engine cycles six display categories for the first (not largest-weighted)
-physical component of a mixed recipe. These colors are not printable swatches.
+Stage 4D-A maps actual mixture percentages to the dominant physical slot.
+Categorical colors are retained as an optional high-contrast display.
 """
 import re
 

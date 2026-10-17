@@ -41,6 +41,14 @@ uniform vec3 selectedExtraColors[64];
 uniform int protectedCount;
 uniform int showProtectedOverlay;
 uniform vec3 protectedSourceColors[128];
+// Optional Stage 4D-A lookup. For this mode sourceTag.x is the SOURCE slot,
+// not a display RGB tag. Source slot 0 is reserved for missing metadata.
+uniform int influenceMode;  // 0=normal, 1=physical, 2=categorical, 3=contribution
+uniform int influenceSelectedSlot;
+uniform int influenceAnchorCount;
+uniform sampler2D influenceWeights;
+uniform vec3 influencePhysicalColors[8];
+uniform vec3 influenceCategoricalColors[8];
 out vec4 fragColor;
 void main() {
     vec3 n = normalize(worldNormal);
@@ -51,6 +59,25 @@ void main() {
     float fill = abs(dot(n, fillLight));
     float shade = 0.54 + 0.34 * key + 0.12 * fill;
     vec3 surface = faceColor * shade;
+    if (influenceMode != 0) {
+        int sourceSlot = int(sourceTag.r + 0.5);
+        if (sourceSlot > 0) {
+            int dominant = int(texelFetch(influenceWeights, ivec2(0, sourceSlot), 0).g + 0.5);
+            if (influenceSelectedSlot > 0 && influenceSelectedSlot <= influenceAnchorCount) {
+                float share = clamp(texelFetch(influenceWeights,
+                    ivec2(influenceSelectedSlot - 1, sourceSlot), 0).r, 0.0, 1.0);
+                // Dark means not present; brighter cyan means a larger recipe share.
+                surface = mix(vec3(0.11, 0.16, 0.22), vec3(0.19, 0.87, 0.96), share) * shade;
+            } else if (dominant >= 1 && dominant <= influenceAnchorCount) {
+                vec3 display = (influenceMode == 2)
+                    ? influenceCategoricalColors[dominant - 1]
+                    : influencePhysicalColors[dominant - 1];
+                surface = display * shade;
+            }
+        }
+        fragColor = vec4(surface, 1.0);
+        return;
+    }
     bool isSelected = selectedSourceColor.r >= 0.0 && distance(sourceTag, selectedSourceColor) < 0.0025;
     if (!isSelected) {
         for (int i = 0; i < selectedExtraCount; ++i) {
@@ -107,6 +134,8 @@ class ModelViewport(QOpenGLWidget):
         self.setMouseTracking(True)
         self._mesh=None;self._data=None;self._dirty=False;self._verts=0
         self._gl=None;self._program=0;self._vao=0;self._vbo=0;self._error=''
+        self._influence_data=None;self._influence_texture=0;self._influence_dirty=False
+        self._influence_display='physical';self._influence_selected=0
         self._last=None;self._drag_button=None
         self._press_position=None
         self.wireframe=False
@@ -153,6 +182,35 @@ class ModelViewport(QOpenGLWidget):
         """Optional inspection tint; original material colors remain intact by default."""
         self.show_protected_overlay=bool(enabled)
         self.update()
+
+    def set_influence_analysis(self, data, *, display='physical', selected=0):
+        """Change analysis colors by shader uniforms; do not rebuild geometry."""
+        if data is not self._influence_data:
+            self._influence_data=data
+            self._influence_dirty=True
+        self._influence_display=display if display in ('physical','categorical') else 'physical'
+        self._influence_selected=max(0,int(selected or 0))
+        self.update()
+
+    def _upload_influence_texture(self):
+        gl=self._gl
+        if self._influence_texture:
+            gl.glDeleteTextures([self._influence_texture]);self._influence_texture=0
+        self._influence_dirty=False
+        if not self._influence_data:return
+        data=self._influence_data
+        count=int(data['sourceCount'])+1
+        if count>int(gl.glGetIntegerv(gl.GL_MAX_TEXTURE_SIZE)):
+            raise ValueError('Source color count exceeds the graphics driver texture limit')
+        self._influence_texture=gl.glGenTextures(1)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glBindTexture(gl.GL_TEXTURE_2D,self._influence_texture)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D,gl.GL_TEXTURE_MIN_FILTER,gl.GL_NEAREST)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D,gl.GL_TEXTURE_MAG_FILTER,gl.GL_NEAREST)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D,gl.GL_TEXTURE_WRAP_S,gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D,gl.GL_TEXTURE_WRAP_T,gl.GL_CLAMP_TO_EDGE)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D,0,gl.GL_RGBA32F,8,count,0,
+                        gl.GL_RGBA,gl.GL_FLOAT,data['weights'].tobytes())
 
     def reset_camera(self):
         self.yaw=-1.47;self.pitch=0.30;self.zoom=1.
@@ -241,6 +299,25 @@ class ModelViewport(QOpenGLWidget):
                                    max(0.001,eye_distance-radius*2.1),eye_distance+radius*3.0)
             mvp=projection*view
             gl.glUseProgram(self._program)
+            if self._influence_dirty:self._upload_influence_texture()
+            analysis=self._influence_data
+            enabled=bool(analysis and self._influence_texture and not self.wireframe)
+            mode=(3 if self._influence_selected else
+                  2 if self._influence_display=='categorical' else 1) if enabled else 0
+            gl.glUniform1i(gl.glGetUniformLocation(self._program,'influenceMode'),mode)
+            gl.glUniform1i(gl.glGetUniformLocation(self._program,'influenceSelectedSlot'),
+                           self._influence_selected if enabled else 0)
+            gl.glUniform1i(gl.glGetUniformLocation(self._program,'influenceAnchorCount'),
+                           len(analysis['anchors']) if enabled else 0)
+            if enabled:
+                gl.glActiveTexture(gl.GL_TEXTURE0)
+                gl.glBindTexture(gl.GL_TEXTURE_2D,self._influence_texture)
+                gl.glUniform1i(gl.glGetUniformLocation(self._program,'influenceWeights'),0)
+                for idx,(physical,categorical) in enumerate(analysis['anchors']):
+                    for uniform,color in (('influencePhysicalColors',physical),
+                                          ('influenceCategoricalColors',categorical)):
+                        gl.glUniform3f(gl.glGetUniformLocation(self._program,f'{uniform}[{idx}]'),
+                                       *(int(color[j:j+2],16)/255.0 for j in (1,3,5)))
             location=gl.glGetUniformLocation(self._program,'projectionView')
             # Qt copyDataTo() is row-major; helper requests GL transpose.
             _upload_projection_view(gl, location, mvp)
@@ -310,6 +387,8 @@ class ModelViewport(QOpenGLWidget):
         if self._gl and self.context() and self.context().isValid():
             self.makeCurrent()
             try:
+                if self._influence_texture:
+                    self._gl.glDeleteTextures([self._influence_texture]);self._influence_texture=0
                 if self._vbo:self._gl.glDeleteBuffers(1,[self._vbo]);self._vbo=0
                 if self._vao:self._gl.glDeleteVertexArrays(1,[self._vao]);self._vao=0
                 if self._program:self._gl.glDeleteProgram(self._program);self._program=0

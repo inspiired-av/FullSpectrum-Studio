@@ -52,7 +52,7 @@ class AnchorStateTests(unittest.TestCase):
         legend=(ROOT/'desktop/qt_app/preview_legend.py').read_text(encoding='utf-8')
         self.assertIn('WA_TransparentForMouseEvents',legend)
         self.assertIn('parent.height()-self.height()-12',legend)
-        self.assertIn('first recipe component',legend)
+        self.assertIn('dominant physical',legend)
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6') is not None,'PySide6 unavailable')
 class QtAnchorLegendTests(unittest.TestCase):
@@ -62,7 +62,7 @@ class QtAnchorLegendTests(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app=QApplication.instance() or QApplication([])
 
-    def test_widget_uses_lower_left_and_wont_block_orbit(self):
+    def test_widget_uses_lower_left_and_is_clickable(self):
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QWidget
         from desktop.qt_app.preview_legend import AnchorInfluenceLegend
@@ -72,12 +72,23 @@ class QtAnchorLegendTests(unittest.TestCase):
             legend.set_rows(anchor_legend_rows(sample()))
             parent.show();legend.show();self.app.processEvents()
             self.assertTrue(legend.has_rows)
-            self.assertTrue(legend.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+            self.assertFalse(legend.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
             self.assertEqual(legend.x(),12)
             self.assertLessEqual(legend.y()+legend.height(),parent.height())
             parent.resize(430,230);self.app.processEvents()
             legend.position_over_viewport()
             self.assertLessEqual(legend.y()+legend.height(),parent.height())
+            legend._choose(2)
+            self.app.processEvents()
+            self.assertEqual(legend.selected_slot,2)
+            self.assertLessEqual(legend.y()+legend.height(),parent.height())
+            # Reflow to one column + scrolling in a short, narrow viewport.
+            parent.resize(345,175);self.app.processEvents()
+            legend.position_over_viewport();self.app.processEvents()
+            self.assertLessEqual(legend.y()+legend.height(),parent.height())
+            self.assertTrue(next(button.isChecked() for button,record in legend._buttons
+                                 if record['slot']==2))
+            self.assertGreater(legend._grid_scroll.verticalScrollBar().maximum(),0)
             legend.set_rows(())
             self.assertFalse(legend.has_rows)
         finally:parent.close()

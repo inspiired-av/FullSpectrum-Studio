@@ -98,6 +98,7 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
     bias = 'auto' if s['smart_quality'] else s['quality_bias']
     preview_meshes = {}
     preview_note = ''
+    influence_data = None
     with TemporaryDirectory(prefix='fullspectrum_qt_forecast_') as workdir:
         analysis_root = Path(workdir) / 'analysis' if getattr(request, 'visualization', False) else None
         output = engine.convert(
@@ -118,6 +119,18 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
             from desktop.qt_app.forecast_preview_assets import load_forecast_previews
             preview_meshes, preview_note = load_forecast_previews(
                 output.get('analysisAssets'), analysis_root)
+            if preview_meshes.get('influence'):
+                try:
+                    from desktop.qt_app.anchor_influence import prepare_influence
+                    influence_data = prepare_influence(
+                        output.get('analysisAssets'), analysis_root,
+                        preview_meshes['influence'], output.get('recipes'),
+                        output.get('anchors'), output.get('sourceSlots'))
+                except (ValueError, OSError, TypeError, KeyError) as exc:
+                    # A provenance error disables interactive influence only.
+                    # Predicted and color-loss forecasts are still valid.
+                    preview_note = (preview_note + ' ' if preview_note else '') + (
+                        'Interactive anchor influence unavailable: ' + str(exc))
     if output.get('type') != 'planPreview':
         raise RuntimeError('Engine returned a conversion result instead of a read-only plan preview.')
     forecast = plan_forecast(output)
@@ -130,6 +143,7 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
         'warnings': list(output.get('warnings') or []),
         'plannerMode': output.get('plannerMode'),
         'previewMeshes': preview_meshes,
+        'previewInfluence': influence_data,
         'previewNote': preview_note,
         # Stage 4B: preserve the EXISTING native optimizer's details for a
         # read-only inspection table; never re-optimize or guess recipes here.

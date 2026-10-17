@@ -35,7 +35,7 @@ TOPICS = {
 
 **Color Loss** maps estimated color difference (ΔE) across the model: green is low (ΔE ≤ 2), yellow is moderate (2–6), and orange-red indicates higher error (> 6). The key appears inside the viewport when this mode is selected. These are estimates, not calibrated measurements.
 
-**Anchor Influence** groups regions by an associated physical filament anchor. For mixed recipes, the engine currently labels the first contributing anchor; it is **not** a proportional contribution map. Its colors are category markers, **not** the filament's real color or ΔE.
+**Anchor Influence** shows each region's dominant physical filament (the largest recipe percentage), using the actual filament color by default. Choose **Distinct colors** for higher contrast. Click an anchor in the legend to display its percentage contribution in every region, including where it is a secondary component. Percentages describe optimizer recipes, not measured filament consumption. Refresh after changing filament settings.
 
 **Wireframe** displays the original geometry as an edge mesh. Orbit, pan, zoom and Reset View work in every mode. Predicted analysis modes require a successful forecast; obsolete forecasts remain marked **OUTDATED** until refreshed."""),
     'live_forecast': HelpTopic(

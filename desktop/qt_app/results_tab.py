@@ -1,7 +1,7 @@
 """Results and activity workspace for the pre-conversion Qt desktop shell.
 
 This is read-only: users may view existing conversion/validation reports, but
-Stage 4B forecasts palettes but does not export 3MF or claim print validation.
+Stage 4D-A forecasts palettes but does not export 3MF or claim print validation.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class ResultsTab(QWidget):
         self.setObjectName('resultsTab')
         self._build()
         self.set_context('', '', 'Bambu Studio', False)
-        self.record_event('Ready', 'Stage 4B session initialized. No conversion has run.', 'info')
+        self.record_event('Ready', 'Stage 4D-A session initialized. No conversion has run.', 'info')
 
     def _build(self):
         outer = QVBoxLayout(self)
@@ -60,7 +60,7 @@ class ResultsTab(QWidget):
         self.phase_label.setStyleSheet('color: #89d9c3; font-weight: 600;')
         heading.addWidget(self.phase_label)
         heading.addStretch()
-        self.stage_label = _text('Stage 4B', 'helpText')
+        self.stage_label = _text('Stage 4D-A', 'helpText')
         heading.addWidget(self.stage_label)
         layout.addLayout(heading)
         layout.addWidget(_text('Palette forecasts run from Plan. Native 3MF composition and validation '

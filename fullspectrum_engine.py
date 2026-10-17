@@ -3950,6 +3950,20 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                 analysis_assets=build_plan_analysis_assets(
                     project_file,old,rows,real_count,analysis_dir,warnings,progress,planning_preview_mesh
                 )
+            # Stage 4D-A: temporary source-face provenance for interactive
+            # influence percentages. No conversion 3MF is written or changed.
+            if analysis_dir and analysis_assets and analysis_assets.get("predictedMesh"):
+                try:
+                    from anchor_preview_map import write_face_slot_map
+                    analysis_root=Path(analysis_dir)
+                    mapping=write_face_slot_map(
+                        analysis_root/"source-face-slots.bin",
+                        direct_source=direct_source,
+                        source_mesh=(analysis_assets["predictedMesh"] if direct_source is None else None),
+                    )
+                    analysis_assets["sourceSlotMap"]=str(mapping)
+                except (OSError, ValueError, KeyError) as exc:
+                    warnings.append("Interactive anchor influence unavailable: " + str(exc))
             progress(1.0,"Plan preview ready. No 3MF was written.")
             result=plan_preview_payload(
                 infile,mode,palette_source,planner_mode,planning_sample,
