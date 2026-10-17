@@ -20,6 +20,7 @@ class ForecastRequest:
     disabled: frozenset[str]
     pinned: frozenset[str]
     protections: tuple[tuple[str, str], ...]
+    visualization: bool = True  # GUI requests read-only analysis meshes.
 
 
 def make_request(model, reference, preferences, filament_preferences):
@@ -95,7 +96,10 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
     if source != 'exact-cmykw' and len({str(o.get('color', '')).upper() for o in options if o['key'] in enabled}) < 2:
         raise ValueError('Enable at least two distinct available filament colors before forecasting.')
     bias = 'auto' if s['smart_quality'] else s['quality_bias']
+    preview_meshes = {}
+    preview_note = ''
     with TemporaryDirectory(prefix='fullspectrum_qt_forecast_') as workdir:
+        analysis_root = Path(workdir) / 'analysis' if getattr(request, 'visualization', False) else None
         output = engine.convert(
             path, s['strategy'], palette_source=source,
             output_dir=workdir, reveal=False, real_slots=s['real_slots'],
@@ -108,8 +112,12 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
             mix_model='bambu', plan_only=True,
             allowed_anchor_keys=sorted(enabled) if request.disabled else None,
             pinned_anchor_keys=pinned, solid_color_overrides=protected,
-            analysis_dir=None, progress=progress,
+            analysis_dir=str(analysis_root) if analysis_root else None, progress=progress,
         )
+        if analysis_root is not None and output.get('type') == 'planPreview':
+            from desktop.qt_app.forecast_preview_assets import load_forecast_previews
+            preview_meshes, preview_note = load_forecast_previews(
+                output.get('analysisAssets'), analysis_root)
     if output.get('type') != 'planPreview':
         raise RuntimeError('Engine returned a conversion result instead of a read-only plan preview.')
     forecast = plan_forecast(output)
@@ -121,6 +129,8 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
         'outputSlots': output.get('outputSlots'),
         'warnings': list(output.get('warnings') or []),
         'plannerMode': output.get('plannerMode'),
+        'previewMeshes': preview_meshes,
+        'previewNote': preview_note,
         # Stage 4B: preserve the EXISTING native optimizer's details for a
         # read-only inspection table; never re-optimize or guess recipes here.
         'planningDetails': {

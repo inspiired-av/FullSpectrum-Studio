@@ -10,6 +10,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / 'desktop/qt_app'
 KEEP = {
+    # Stage 4C adds one meaningful help button beside the preview mode selector.
+    'preview_modes',
     'live_forecast','expected_palette',
     'color_optimization','native_project_template','advanced_settings',
     'filament_source','filament_colors','protect_solid_colors',
@@ -30,6 +32,8 @@ class HelpPolishContractTests(unittest.TestCase):
         keys={ast.literal_eval(k) for k in table.value.keys}
         self.assertEqual(keys, KEEP)
         main=(UI/'main_window.py').read_text(encoding='utf-8')
+        self.assertIn("SectionHelpButton('preview_modes')", main)
+        self.assertNotIn("SectionHelpButton('model_preview')", main)
         results=(UI/'results_tab.py').read_text(encoding='utf-8')
         self.assertNotIn("SectionHelpButton('optimization_details')",main)
         self.assertNotIn('help_heading(',results)

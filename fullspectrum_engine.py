@@ -3919,11 +3919,31 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
         real_profiles,mixed_profile=project_compatible_profiles(obj,anchors)
         if plan_only:
             if direct_source is not None and analysis_dir:
+                # Stage 4C: direct material-colored 3MFs need all three honest
+                # analysis views. Color loss and influence are keyed to the
+                # ORIGINAL RGB source slots, not newly allocated output slots.
+                analysis_root=Path(analysis_dir)
                 predicted=write_predicted_obj(
                     direct_source,old_slot_to_new_slot,newc,
-                    Path(analysis_dir)/"direct-source-predicted.obj"
+                    analysis_root/"direct-source-predicted.obj"
                 )
-                analysis_assets={"predictedMesh":str(predicted)}
+                _,loss_colors,influence_colors=plan_analysis_preview_colors(
+                    old,rows,real_count
+                )
+                identity_slots={slot:slot for slot in range(1,len(old)+1)}
+                heatmap=write_predicted_obj(
+                    direct_source,identity_slots,loss_colors,
+                    analysis_root/"direct-source-color-loss.obj"
+                )
+                influence=write_predicted_obj(
+                    direct_source,identity_slots,influence_colors,
+                    analysis_root/"direct-source-anchor-influence.obj"
+                )
+                analysis_assets={
+                    "predictedMesh":str(predicted),
+                    "heatmapMesh":str(heatmap),
+                    "anchorInfluenceMesh":str(influence),
+                }
             elif direct_source is not None:
                 analysis_assets=None
             else:

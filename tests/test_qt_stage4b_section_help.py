@@ -10,6 +10,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / 'desktop' / 'qt_app'
 REQUIRED = (
+    # Stage 4C view modes merit a context-specific help button.
+    'preview_modes',
     'live_forecast', 'expected_palette',
     'color_optimization', 'native_project_template',
     'advanced_settings', 'filament_source', 'filament_colors',
@@ -44,6 +46,7 @@ class ContextualHelpContractTests(unittest.TestCase):
         for name in ('model_preview', 'source_palette'):
             self.assertNotIn(f'SectionHelpButton("{name}")', main)
         self.assertIn("SectionHelpButton('advanced_settings')", main)
+        self.assertIn("SectionHelpButton('preview_modes')", main)
         for name in ('live_forecast','expected_palette','color_optimization','native_project_template'):
             self.assertIn(f'help_heading("{name}"', main)
         for name in ('filament_source', 'filament_colors', 'protect_solid_colors'):

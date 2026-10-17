@@ -54,12 +54,12 @@ class SourceFidelityTests(unittest.TestCase):
 
     def test_highlight_selection_does_not_modify_source_mesh_or_render_buffer(self):
         file=ROOT/'desktop/qt_app/main_window.py'
-        s=file.read_text()
+        s=file.read_text(encoding='utf-8')
         self.assertIn('self.preview_surface.set_highlights(',s)
         self.assertIn('source_color_selected.connect(self._filament_color_selected)',s)
         self.assertIn('protections_changed.connect(self._protections_updated)',s)
         self.assertIn('self.filaments_panel.select_source_color(color)',s)
-        self.assertIn("if self.preview_mode.currentText()=='Predicted'",s)
+        self.assertIn("'Predicted', 'Color Loss', 'Anchor Influence'",s)
 
 try:
     from PySide6.QtWidgets import QApplication

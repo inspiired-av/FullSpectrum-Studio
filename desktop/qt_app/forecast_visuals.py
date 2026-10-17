@@ -6,6 +6,22 @@ from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout, QVBoxLayout, QSizePolicy, QFrame
 
+def forecast_guidance(forecast, warnings=()):
+    """Give a useful follow-up without repeating the worst-color comparison.
+
+    The worst target, predicted HEX and maximum ΔE are already displayed in
+    WorstMatchPanel. The source forecast suggestion is engine-authored.
+    """
+    suggestion = forecast.get('suggestion') if isinstance(forecast, dict) else None
+    if isinstance(suggestion, dict) and suggestion.get('name'):
+        name = str(suggestion['name']).strip()
+        availability = str(suggestion.get('availability') or '').strip()
+        return f'Consider filament: {name}' + (f' · {availability}' if availability else '')
+    if warnings:
+        return 'Note: ' + str(warnings[0])
+    return ''
+
+
 HEX_PAIR = re.compile(r'Worst target\s+(#[0-9a-fA-F]{6})\s+becomes\s+(#[0-9a-fA-F]{6})', re.I)
 
 

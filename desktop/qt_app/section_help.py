@@ -28,6 +28,16 @@ LIBRARY_EXAMPLE = ('https://github.com/inspiired-av/FullSpectrum-Studio/'
                    'blob/feat/qt-ui-redesign/examples/custom-palette.example.json')
 
 TOPICS = {
+    'preview_modes': HelpTopic(
+        'Model Preview Modes',
+        'Compare the original, forecast prediction, color difference, and anchor influence.',
+        """**Original** shows the source model and its existing colors. **Predicted** shows the engine's planned colors before export; a manually opened predicted OBJ is labeled separately.
+
+**Color Loss** maps estimated color difference (ΔE) across the model: green is low (ΔE ≤ 2), yellow is moderate (2–6), and orange-red indicates higher error (> 6). The key appears inside the viewport when this mode is selected. These are estimates, not calibrated measurements.
+
+**Anchor Influence** groups regions by an associated physical filament anchor. For mixed recipes, the engine currently labels the first contributing anchor; it is **not** a proportional contribution map. Its colors are category markers, **not** the filament's real color or ΔE.
+
+**Wireframe** displays the original geometry as an edge mesh. Orbit, pan, zoom and Reset View work in every mode. Predicted analysis modes require a successful forecast; obsolete forecasts remain marked **OUTDATED** until refreshed."""),
     'live_forecast': HelpTopic(
         'Live Forecast',
         'Predicted accuracy, confidence, and color error before slicing.',

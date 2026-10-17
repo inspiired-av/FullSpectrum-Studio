@@ -122,13 +122,16 @@ class ModelViewport(QOpenGLWidget):
     @property
     def mesh(self):return self._mesh
 
-    def set_mesh(self,mesh):
+    def set_mesh(self,mesh,*,preserve_camera=False):
         self._mesh=mesh
         # Prefer geometry prepared by ModelLoadWorker so the UI remains responsive.
         self._data=(getattr(mesh, 'render_buffer', None) or _flatten_faces(mesh)) if mesh else None
         self._verts=len(self._data)//12 if self._data is not None else 0
         self._dirty=True
-        self.reset_camera()
+        if preserve_camera:
+            self.update()
+        else:
+            self.reset_camera()
 
     def clear_mesh(self):
         self.set_mesh(None)

@@ -1,4 +1,4 @@
-"""FullSpectrum Studio Qt Stage 4B: read-only inspection and real plan forecasts.
+"""FullSpectrum Studio Qt Stage 4C: read-only 3D palette visualization and forecasts.
 
 Conversion/export remain in the existing frontend until Stage 4D.
 """
@@ -32,7 +32,9 @@ from desktop.qt_app.forecast_view_state import ForecastViewState
 from desktop.qt_app.planning_details_panel import PlanningDetailsPanel
 from desktop.qt_app.wheel_safe_combo import WheelSafeComboBox
 from desktop.qt_app.section_help import SectionHelpButton, help_heading
-from desktop.qt_app.forecast_visuals import RingGauge, WorstMatchPanel
+from desktop.qt_app.forecast_visuals import RingGauge, WorstMatchPanel, forecast_guidance
+from desktop.qt_app.preview_legend import ColorLossLegend, AnchorInfluenceLegend
+from desktop.qt_app.anchor_legend_state import anchor_legend_rows
 from desktop.qt_app.forecast_setup_gate import evaluate_setup
 from desktop.qt_app.source_palette import PaletteSwatch, responsive_columns
 from desktop.qt_app.results_tab import ResultsTab
@@ -78,6 +80,9 @@ class MainWindow(QMainWindow):
         self._predicted_mesh = None
         self._predicted_serial = 0
         self._predicted_filename = ""
+        self._live_preview_meshes = {}
+        self._live_preview_stale = False
+        self._use_external_predicted = False
         self.plan_preferences = PlanPreferences(settings_path)
         self._forecast_view = ForecastViewState()  # Current model only; never saved to disk.
         self._forecast_serial = 0
@@ -112,7 +117,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         QTimer.singleShot(0, self._initialize_filament_setup)
         self.statusBar().showMessage(
-            "Qt Stage 4B — real read-only engine forecasts and project inspection; native 3MF export remains in Stage 4D."
+            "Qt Stage 4C — read-only predicted 3D and color-loss visualization; native 3MF export remains in Stage 4D."
         )
 
     def _build(self):
@@ -137,7 +142,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 4B", "badge"))
+        h.addWidget(_label("UI prototype · Stage 4C", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -176,13 +181,16 @@ class MainWindow(QMainWindow):
         row.addWidget(_label("MODEL PREVIEW", "smallTitle"))
         row.addStretch()
         self.preview_mode = WheelSafeComboBox()
-        self.preview_mode.addItems(["Original", "Predicted", "Color Loss", "Wireframe"])
+        self.preview_mode.addItems(["Original", "Predicted", "Color Loss", "Anchor Influence", "Wireframe"])
         self.preview_mode.setCurrentText("Original")
         self.preview_mode.setObjectName("previewMode")
         self.preview_mode.setEnabled(False)
-        self.preview_mode.setToolTip("Original source colors, saved predicted OBJ (when loaded), or wireframe. Live prediction is not run in Qt yet.")
+        self.preview_mode.setToolTip("Original, predicted colors, color-loss heatmap, and anchor influence from the current plan-only forecast. Wireframe retains original geometry.")
         self.preview_mode.currentTextChanged.connect(self._preview_mode_changed)
         row.addWidget(self.preview_mode)
+        # Explain every view without bringing back the unnecessary heading glyph.
+        self.preview_mode_help = SectionHelpButton('preview_modes')
+        row.addWidget(self.preview_mode_help)
         self.load_predicted_button = QPushButton('Load Predicted…')
         self.load_predicted_button.setObjectName('loadPredictedButton')
         self.load_predicted_button.setToolTip('Load an existing FullSpectrum predicted .obj with its matching .mtl. Does not run a conversion.')
@@ -212,6 +220,12 @@ class MainWindow(QMainWindow):
         model_layout.addWidget(self.preview_surface, stretch=1)
         self.preview_status = _label("Open a 3MF, OBJ or GLB model to view its geometry.", "helpText", wrap=True)
         model_layout.addWidget(self.preview_status)
+        # A compact in-viewport key is easier to read than an inline footnote.
+        # It is a Qt child overlay; no texture, geometry or OpenGL change.
+        self.preview_legend = ColorLossLegend(self.preview_surface)
+        self.preview_legend.setVisible(False)
+        self.anchor_legend = AnchorInfluenceLegend(self.preview_surface)
+        self.anchor_legend.setVisible(False)
         self.preview_splitter.addWidget(model_area)
 
         palette_area = QFrame()
@@ -361,7 +375,7 @@ class MainWindow(QMainWindow):
         detail = QVBoxLayout()
         detail.setSpacing(9)
         self.forecast_metrics = {}
-        for field in ("Confidence", "Worst match", "Palette"):
+        for field in ("Confidence", "Mean ΔE", "Palette"):
             line = QHBoxLayout()
             line.addWidget(_label(field, "bodyMuted"))
             line.addStretch()
@@ -1148,14 +1162,8 @@ class MainWindow(QMainWindow):
         self._update_preview_highlights()
         self.reset_camera_button.setEnabled(True)
         self.preview_mode.setEnabled(True)
-        # Stage 3A does not display predicted colors or error maps.
-        for index in range(self.preview_mode.count()):
-            label = self.preview_mode.itemText(index)
-            if label not in ('Original', 'Wireframe'):
-                # Items remain visible but unavailable, avoiding a fake preview.
-                item = self.preview_mode.model().item(index)
-                if item is not None:
-                    item.setEnabled(False)
+        # Stage 4C enables only the analysis modes actually generated by the engine.
+        self._refresh_preview_modes()
         self.preview_mode.setCurrentText('Original')
         self.preview_surface.set_wireframe(False)
         self.load_predicted_button.setEnabled(True)
@@ -1167,7 +1175,7 @@ class MainWindow(QMainWindow):
         suffix = ' · sampled display only' if mesh.sampled else ''
         info = f"{len(mesh.triangles):,} visible triangles / {mesh.source_triangles:,} source triangles{suffix}"
         self.preview_status.setText(info + ' · Left drag orbit · Right drag pan · Wheel zoom · R reset')
-        self.bottom_hint.setText('Source geometry and colors loaded. Forecasts run on Plan; predicted 3D and export arrive in Stages 4C/4D.')
+        self.bottom_hint.setText('Source geometry and colors loaded. Refresh Forecast for live predicted 3D views; export follows in Stage 4D.')
         self.statusBar().showMessage('3D preview ready: ' + info)
         self.results_panel.record_event('Model preview', info, 'success')
         self.source_inspection.setText(f'Source geometry: {mesh.source_triangles:,} triangles; inspecting project metadata…')
@@ -1240,6 +1248,11 @@ class MainWindow(QMainWindow):
         self._forecast_pending = False
         if self._forecast_task is not None:
             self._forecast_task.requestInterruption()
+        if hasattr(self, '_live_preview_meshes'):
+            if clear_inspection:
+                self._clear_live_preview()
+            else:
+                self._mark_live_preview_stale()
         if clear_inspection:
             # Prevent ever displaying an unrelated model's last forecast.
             self._forecast_view.reset(self.state.model_path)
@@ -1407,6 +1420,8 @@ class MainWindow(QMainWindow):
         if getattr(self, '_forecast_heartbeat', None) is not None:
             self._forecast_heartbeat.stop()
         if error:
+            if getattr(self, '_live_preview_meshes', None):
+                self._mark_live_preview_stale()
             self._forecast_view.invalidate()
             if self._forecast_view.has_previous:
                 details = getattr(self, 'planning_details_panel', None)
@@ -1420,6 +1435,8 @@ class MainWindow(QMainWindow):
             return
         if not self._forecast_view.accept(self.state.model_path, result):
             return  # Do not reuse a forecast for another model.
+        if hasattr(self, '_live_preview_meshes'):
+            self._accept_live_preview(result)
         # Engine result is already fully computed on a worker thread; update
         # read-only detail tables on Qt's owning GUI thread only.
         self.planning_details_panel.set_result(result.get('planningDetails') or {})
@@ -1429,14 +1446,25 @@ class MainWindow(QMainWindow):
         self.confidence_gauge.set_value(forecast['confidence'])
         self.worst_match_panel.set_forecast(forecast)
         self.forecast_metrics['Confidence'].setText(f"{forecast['confidence']:.0f}%")
-        self.forecast_metrics['Worst match'].setText(f"dE {forecast['maximumDeltaE']:.1f}")
+        # Worst *visible* match and maximum ΔE belong together once, in the
+        # swatch comparison below. Use a different, native engine metric here.
+        mean_delta = (result.get('quality') or {}).get('estimatedDeltaE')
+        try:
+            from math import isfinite
+            mean_delta = float(mean_delta)
+            self.forecast_metrics['Mean ΔE'].setText(
+                f'{mean_delta:.1f}' if isfinite(mean_delta) else '—')
+        except (TypeError, ValueError):
+            self.forecast_metrics['Mean ΔE'].setText('—')
         self.forecast_metrics['Palette'].setText(forecast['slotSummary'])
         colors = forecast['colors']
         self._render_forecast_palette(colors)
         self.forecast_palette_label.setText(f'{len(colors)} planned output colors · Estimated before slicing')
         self.forecast_palette_label.setStyleSheet('')
         warnings = result.get('warnings') or []
-        self.forecast_warning.setText(forecast.get('gapMessage') or ('Warnings: '+str(warnings[0]) if warnings else ''))
+        # The panel already owns target/predicted HEX and worst ΔE. Show only
+        # actionable filament guidance or a separate engine warning here.
+        self.forecast_warning.setText(forecast_guidance(forecast, warnings))
         self._set_forecast_status('Read-only plan ready. No native 3MF was exported.')
         self.results_panel.record_event('Live forecast',
             f"Estimated quality {forecast['accuracy']:.1f}%, {forecast['slotSummary']}; no 3MF written.", 'success')
@@ -1609,7 +1637,7 @@ class MainWindow(QMainWindow):
 
     def _update_preview_highlights(self):
         # An external saved Predicted OBJ has unrelated material assignments.
-        if self.preview_mode.currentText()=='Predicted':
+        if self.preview_mode.currentText() in ('Predicted', 'Color Loss', 'Anchor Influence'):
             self.preview_surface.set_highlights(None, ())
         else:
             self.preview_surface.set_highlights(self._source_palette_selected_colors,
@@ -1653,6 +1681,66 @@ class MainWindow(QMainWindow):
             # real splitter width, not QScrollArea's pre-layout size hint.
             QTimer.singleShot(0, self._reflow_source_palette)
 
+    # Stage 4C visual previews use the engine's analysis results; no conversion.
+    def _refresh_preview_modes(self):
+        if not hasattr(self, 'preview_mode'):
+            return
+        availability = {
+            'Predicted': bool(self._live_preview_meshes.get('predicted') or self._predicted_mesh),
+            'Color Loss': bool(self._live_preview_meshes.get('loss')),
+            'Anchor Influence': bool(self._live_preview_meshes.get('influence')),
+        }
+        for index in range(self.preview_mode.count()):
+            name = self.preview_mode.itemText(index)
+            item = self.preview_mode.model().item(index)
+            if item is not None:
+                item.setEnabled(name in ('Original', 'Wireframe') or availability.get(name, False))
+
+    def _clear_live_preview(self):
+        self._live_preview_meshes = {}
+        self._live_preview_stale = False
+        self._use_external_predicted = False
+        if not hasattr(self, 'preview_mode'):
+            return
+        if self.preview_mode.currentText() in ('Predicted', 'Color Loss', 'Anchor Influence'):
+            self.preview_mode.setCurrentText('Original')
+        self._refresh_preview_modes()
+        self.preview_legend.setVisible(False)
+        self.anchor_legend.set_rows(())
+        self.anchor_legend.setVisible(False)
+
+    def _mark_live_preview_stale(self):
+        if not self._live_preview_meshes:
+            return
+        self._live_preview_stale = True
+        self.anchor_legend.setVisible(False)
+        if hasattr(self, 'preview_mode') and self.preview_mode.currentText() in (
+                'Predicted', 'Color Loss', 'Anchor Influence'):
+            self._preview_mode_changed(self.preview_mode.currentText())
+
+    def _accept_live_preview(self, result):
+        meshes = result.get('previewMeshes') or {}
+        self._live_preview_meshes = dict(meshes)
+        self._live_preview_stale = False
+        self._use_external_predicted = False
+        self.anchor_legend.set_rows(anchor_legend_rows(result) if meshes.get('influence') else ())
+        self._refresh_preview_modes()
+        if self.preview_mode.currentText() in ('Predicted', 'Color Loss', 'Anchor Influence'):
+            if self.preview_mode.currentText() == 'Predicted' and not meshes.get('predicted') and self._predicted_mesh:
+                # A manually loaded external OBJ is still available; never call it live.
+                pass
+            elif not meshes.get({'Predicted':'predicted','Color Loss':'loss',
+                                  'Anchor Influence':'influence'}[self.preview_mode.currentText()]):
+                self.preview_mode.setCurrentText('Original')
+            else:
+                self._preview_mode_changed(self.preview_mode.currentText())
+        present = ', '.join(mode.title() for mode in ('predicted', 'loss', 'influence') if meshes.get(mode))
+        note = str(result.get('previewNote') or '')
+        if note:
+            self.results_panel.record_event('3D forecast preview', note, 'warning')
+        if present:
+            self.statusBar().showMessage('Live 3D views available: ' + present)
+
     def _open_predicted(self):
         if self._original_mesh is None:return
         path,_=QFileDialog.getOpenFileName(self,'Open Existing Predicted Preview (OBJ)', '', 'Wavefront OBJ (*.obj)')
@@ -1682,29 +1770,57 @@ class MainWindow(QMainWindow):
             return
         self._predicted_mesh = mesh
         self._predicted_filename = path
-        for i in range(self.preview_mode.count()):
-            if self.preview_mode.itemText(i)=='Predicted':
-                item=self.preview_mode.model().item(i)
-                if item:item.setEnabled(True)
+        self._use_external_predicted = True
+        self._refresh_preview_modes()
         self.preview_mode.setCurrentText('Predicted')
+        self._preview_mode_changed('Predicted')
         self.results_panel.record_event('Saved predicted preview',display_filename(path)+' opened (no conversion run).','success')
         self.statusBar().showMessage('Showing saved predicted colors from '+display_filename(path))
 
     def _preview_mode_changed(self, name):
-        if name == 'Predicted' and self._predicted_mesh is not None:
-            self.preview_surface.set_mesh(self._predicted_mesh)
+        meshes = self._live_preview_meshes
+        lookup = {'Predicted': 'predicted', 'Color Loss': 'loss',
+                  'Anchor Influence': 'influence'}
+        if name in lookup:
+            target = meshes.get(lookup[name])
+            if name == 'Predicted' and self._use_external_predicted and self._predicted_mesh is not None:
+                target = self._predicted_mesh
+            elif name == 'Predicted' and target is None:
+                target = self._predicted_mesh  # Historical manual OBJ inspection.
+            if target is None:
+                if self.preview_mode.currentText() != 'Original':
+                    self.preview_mode.setCurrentText('Original')
+                return
+            if self.preview_surface.mesh is not target:
+                self.preview_surface.set_mesh(target, preserve_camera=True)
             self.preview_surface.set_wireframe(False)
-            self.preview_status.setText('Saved predicted OBJ · '+display_filename(self._predicted_filename)+' · Not a live Qt forecast')
-        elif name in ('Original','Wireframe'):
+            if name == 'Predicted' and target is self._predicted_mesh:
+                caption = 'Saved external predicted OBJ · not the current live forecast'
+            else:
+                caption = {'Predicted': 'Live engine-predicted color preview',
+                           'Color Loss': 'Engine color-loss heatmap (ΔE estimate)',
+                           'Anchor Influence': 'Physical anchor influence regions'}[name]
+                if self._live_preview_stale:
+                    caption += ' · OUTDATED — refresh forecast'
+            self.preview_status.setText(caption)
+        else:
             if self._original_mesh is not None and self.preview_surface.mesh is not self._original_mesh:
-                self.preview_surface.set_mesh(self._original_mesh)
-            self.preview_surface.set_wireframe(name=='Wireframe')
+                self.preview_surface.set_mesh(self._original_mesh, preserve_camera=True)
+            self.preview_surface.set_wireframe(name == 'Wireframe')
             if self._original_mesh is not None:
-                mesh=self._original_mesh
-                suffix=' · sampled display' if mesh.sampled else ''
-                self.preview_status.setText(f'{len(mesh.triangles):,} visible / {mesh.source_triangles:,} source triangles{suffix} · {name}')
-        elif self.preview_mode.currentText()!='Original':
-            self.preview_mode.setCurrentText('Original')
+                mesh = self._original_mesh
+                suffix = ' · sampled display' if mesh.sampled else ''
+                self.preview_status.setText(
+                    f'{len(mesh.triangles):,} visible / {mesh.source_triangles:,} source triangles'
+                    f'{suffix} · {name}')
+        self.preview_legend.setVisible(name == 'Color Loss' and 'loss' in meshes)
+        self.anchor_legend.setVisible(
+            name == 'Anchor Influence' and 'influence' in meshes
+            and not self._live_preview_stale and self.anchor_legend.has_rows)
+        # Source palette selection/tagging is meaningful only on original color IDs.
+        self.tint_protected.setEnabled(name in ('Original', 'Wireframe') and bool(self._preview_protected_colors))
+        self.preview_surface.set_protected_overlay(
+            self.tint_protected.isChecked() and name in ('Original', 'Wireframe'))
         self._update_preview_highlights()
 
     def _reset_camera(self):
