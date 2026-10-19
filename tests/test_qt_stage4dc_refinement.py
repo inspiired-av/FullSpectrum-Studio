@@ -16,7 +16,10 @@ class RefinementContracts(unittest.TestCase):
     def test_ui_export_fields_do_not_invalidate(self):
         s=(ROOT/'desktop/qt_app/main_window.py').read_text(encoding='utf-8')
         self.assertIn("if field in ('native_project_template', 'auto_open', 'output_application',", s)
-        self.assertIn("if not changed:\n            return", s)
+        self.assertIn(
+            "if not changed and field != 'auto_preview':\n            return",
+            s,
+        )
         self.assertIn("self.review_export_button = QPushButton('Review && Export →')", s)
         self.assertIn('if before != after:', s)
         self.assertIn('if source_changed:', s)

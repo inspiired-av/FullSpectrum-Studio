@@ -841,7 +841,7 @@ class MainWindow(QMainWindow):
         self._refresh_dependent_plan_widgets()
         self._update_plan_dirty_state()
         # Saving the same value should never invalidate an existing forecast.
-        if not changed:
+        if not changed and field != 'auto_preview':
             return
         # Automatic forecasting is a scheduling preference, not a planner input.
         # Turning it off must not erase (or invalidate) a successful result.
