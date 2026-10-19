@@ -130,7 +130,7 @@ MAX_REFERENCE_BYTES = 600 * 1024 * 1024
 MAX_IMPORT_FACES = 2_000_000
 MAX_INTERACTIVE_PREVIEW_TRIANGLES = 750_000
 OPTIMIZED_PREVIEW_GRID_RESOLUTION = 72
-PREVIEW_CACHE_VERSION = 1
+PREVIEW_CACHE_VERSION = 2
 
 
 def release_version():
@@ -1795,6 +1795,19 @@ def reduced_preview_geometry(archive, slot_count, grid_resolution=PREVIEW_GRID_R
     )
     if not model_names:
         return [],{}
+    # Honor native build/component placement and object-level physical slots.
+    # The legacy path below remains for isolated synthetic fixtures without a
+    # 3D/3dmodel.model build graph. Never weld disconnected model instances.
+    from preview_world_geometry import preview_geometry
+    small_model = (sum(archive.getinfo(name).file_size for name in model_names)
+                   <= 8 * 1024 * 1024)
+    world_geometry = preview_geometry(
+        archive, slot_count,
+        grid_resolution=None if small_model else grid_resolution,
+        slot_lookup=preview_face_slot,
+    )
+    if world_geometry is not None:
+        return world_geometry
     # Already small models should not have thin surfaces and letter details
     # joined together by display-grid welding.
     if sum(archive.getinfo(name).file_size for name in model_names) <= 8*1024*1024:

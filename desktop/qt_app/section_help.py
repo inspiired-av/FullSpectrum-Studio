@@ -73,7 +73,7 @@ This supplies slicer profiles; it is not the source model. Confirm the detected 
         'Adjust planning effort, physical slots, quality and refresh.',
         """**Planning effort** controls search depth. **Planning sample** determines which source representation is weighted. **Physical slots** limits real materials; **Maximum palette size** separately limits physical plus mixed output colors.
 
-**Smart quality** picks the quality/waste balance automatically; turn it off to use the slider. **Automatic forecast** refreshes after valid edits. Output slicer and native template choices are located on the **Export** tab."""),
+**Smart quality** picks the quality/waste balance automatically; turn it off to use the slider. **Automatic forecast** refreshes after model loading and ordinary planning changes. Filament library choices, Use/Require edits, and Source Palette assignments are staged instead: click **Update Forecast** in Filaments (or **Refresh Forecast** in Plan) once you finish your edits. The previous result remains marked **Outdated**. Saving filaments does not calculate a forecast. Output slicer and native template choices are on **Export**."""),
     'filament_source': HelpTopic(
         'Filament Source',
         'Use Bambu inventory/catalog colors or load your own JSON filament library.',
@@ -93,7 +93,7 @@ Loading the file does not upload it to a server. Changes to its contents require
         'Choose usable filaments and require the ones that must be selected.',
         """**Use** makes a filament available to the optimizer. **Require** guarantees a physical slot and permits mixing. Require also checks Use; unchecking Use clears Require. The number of manually and automatically required filaments together cannot exceed **Physical slots**.
 
-    Search by name, series or HEX. Ctrl+A in the filament table selects visible rows, Ctrl/Shift-click adjusts selection, and clicking a sole selected row again clears it. The two bulk buttons are **Use Selected / Exclude Selected** and **Require Selected / Unrequire Selected**. Invalid batches do not partially apply. **Save Filaments** persists your choices; **Revert** restores saved settings.
+    Search by name, series or HEX. Ctrl+A in the filament table selects visible rows, Ctrl/Shift-click adjusts selection, and clicking a sole selected row again clears it. The two bulk buttons are **Use Selected / Exclude Selected** and **Require Selected / Unrequire Selected**. Invalid batches do not partially apply. Filament changes are staged; select **Update Forecast** once when ready. **Save Filaments** persists your choices; **Revert** restores saved settings.
 
     A source-color assignment in **Source Palette** automatically requires its physical filament and locks Use/Require while assigned. The assignment and requirement are model-specific and are not saved as a permanent manual Require selection."""),
     'source_palette_assignments': HelpTopic(

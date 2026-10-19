@@ -108,6 +108,7 @@ class FilamentsTab(QWidget):
     source_color_selected = Signal(object)
     protections_changed = Signal(object)
     planning_changed = Signal(bool)  # Valid live (unsaved) filament choices changed.
+    explicit_refresh_requested = Signal()  # User clicked Load / Refresh, not automatic startup.
     def __init__(self, plan_preferences, settings_path=None, parent=None):
         super().__init__(parent)
         self.plan_preferences = plan_preferences
@@ -305,6 +306,8 @@ class FilamentsTab(QWidget):
             self.load_options()
 
     def load_options(self, force=False):
+        if force:
+            self.explicit_refresh_requested.emit()
         source, library = self._source_settings()
         sig = source, library
         if not force and sig == self._source_signature:

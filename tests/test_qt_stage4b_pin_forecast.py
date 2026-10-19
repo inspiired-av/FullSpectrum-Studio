@@ -132,7 +132,7 @@ class QtPinIntegrationTests(unittest.TestCase):
         from desktop.settings_store import load_settings
         self.assertNotIn(key,load_settings(self.w.plan_preferences.path).get('pinned_anchor_keys', []))
 
-    def test_automatic_changes_restart_debounce(self):
+    def test_automatic_changes_are_staged_until_requested(self):
         source=Path(self.temp.name)/'temporary.3mf'
         source.write_bytes(b'not processed: only used to activate debounce')
         self.w.state.model_path=str(source)
@@ -140,7 +140,10 @@ class QtPinIntegrationTests(unittest.TestCase):
         self.w.auto_forecast.setChecked(True)
         self.w._forecast_timer.stop()
         self.panel._rows[0][2].setChecked(True)
-        self.assertTrue(self.w._forecast_timer.isActive())
+        # D3 intentionally stages filament edits without repeated forecasts.
+        self.assertTrue(self.w._filament_forecast_held)
+        self.assertFalse(self.w._forecast_timer.isActive())
+        self.assertTrue(self.w.update_filament_forecast_button.isEnabled())
 
     def test_invalid_extra_pins_do_not_replace_valid_snapshot(self):
         self.w.plan_preferences.set('real_slots','2')
