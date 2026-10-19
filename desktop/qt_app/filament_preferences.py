@@ -47,7 +47,10 @@ class FilamentPreferences:
             raise ValueError('Use at least two distinct filament colors.')
         if not pinned <= enabled:
             raise ValueError('Required filaments must also have Use checked.')
-        if len(pinned) > int(max_slots):
+        assigned_targets=set(self.solid_assignments.values())
+        if any(key in keys and key not in enabled for key in assigned_targets):
+            raise ValueError('An assigned filament cannot be excluded; remove its source-color assignment first.')
+        if len(pinned | assigned_targets) > int(max_slots):
             count = int(max_slots)
             noun = 'filament' if count == 1 else 'filaments'
             raise ValueError(
@@ -103,6 +106,31 @@ class FilamentPreferences:
         if filament_key not in valid_keys:
             raise ValueError('Choose an enabled physical filament.')
         self.solid_assignments[source] = filament_key
+
+    def assign(self, source_color, filament_key, available_colors, options, max_slots):
+        """Atomically assign a source color, automatically enabling its filament.
+
+        The automatically required filament is NOT added to saved manual pins.
+        Removing the last assignment restores the prior manual Require state.
+        """
+        source=str(source_color or '').upper()
+        keys={str(option['key']) for option in options}
+        if not _HEX.fullmatch(source) or source not in {str(c).upper() for c in available_colors}:
+            raise ValueError('Select an exact source color from the original 3MF model.')
+        if filament_key not in keys:
+            raise ValueError('Choose a filament available in the current library.')
+        proposed=dict(self.solid_assignments)
+        proposed[source]=filament_key
+        if len(proposed)>31:
+            raise ValueError('At most 31 exact source-color assignments are supported.')
+        if len(set(proposed.values()) | (self.pinned & keys)) > int(max_slots):
+            raise ValueError('Assigned and manually required filaments exceed Physical slots.')
+        disabled=set(self.disabled)
+        disabled.discard(filament_key)
+        self.disabled=disabled
+        self.solid_assignments=proposed
+        self._dirty=(self.disabled != set(self.saved.get('disabled_anchor_keys', []))
+                     or self.pinned != set(self.saved.get('pinned_anchor_keys', [])))
 
     def unprotect(self, source_color):
         self.solid_assignments.pop(str(source_color).upper(), None)

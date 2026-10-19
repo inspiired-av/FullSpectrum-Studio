@@ -12,8 +12,8 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QScrollArea, QSlider, QSplitter, QTabWidget,
-    QLineEdit, QCheckBox, QToolButton, QMessageBox, QFormLayout,
-    QVBoxLayout, QGridLayout, QWidget, QSizePolicy, QProgressBar,
+    QLineEdit, QCheckBox, QToolButton, QMessageBox, QMenu, QFormLayout,
+    QVBoxLayout, QGridLayout, QLayout, QWidget, QSizePolicy, QProgressBar,
 )
 
 from desktop.app_support import APP_VERSION
@@ -39,6 +39,7 @@ from desktop.qt_app.preview_legend import ColorLossLegend, AnchorInfluenceLegend
 from desktop.qt_app.anchor_legend_state import anchor_legend_rows
 from desktop.qt_app.forecast_setup_gate import evaluate_setup
 from desktop.qt_app.source_palette import PaletteSwatch, responsive_columns
+from desktop.qt_app.source_assignments_panel import SourceAssignmentsPanel
 from desktop.qt_app.results_tab import ResultsTab
 from desktop.qt_app.shell_state import (
     ShellState, display_filename, MODEL_FILE_FILTER, REFERENCE_FILE_FILTER,
@@ -124,7 +125,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         QTimer.singleShot(0, self._initialize_filament_setup)
         self.statusBar().showMessage(
-            "Qt Stage 4D-D1 — filament selection and bulk controls."
+            "Qt Stage 4D-D2 — source-color assignment and filament reservation."
         )
 
     def _build(self):
@@ -149,7 +150,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 4D-D1", "badge"))
+        h.addWidget(_label("UI prototype · Stage 4D-D2", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -240,15 +241,36 @@ class MainWindow(QMainWindow):
         palette_area = QFrame()
         palette_area.setObjectName('sourcePalettePanel')
         palette_area.setMinimumHeight(94)
-        palette_layout = QVBoxLayout(palette_area)
-        palette_layout.setContentsMargins(0, 4, 0, 0)
+        self._source_palette_area = palette_area
+        self._assigned_inspector_previous_height = None
+        self._assigned_inspector_auto_height = None
+        # The whole palette (controls, swatches and assignment inspector)
+        # scrolls as one region; no competing inner scrollbars.
+        palette_outer = QVBoxLayout(palette_area)
+        palette_outer.setContentsMargins(0, 0, 0, 0)
+        palette_outer.setSpacing(0)
+        self.source_palette_scroll = QScrollArea(palette_area)
+        self.source_palette_scroll.setObjectName('sourcePaletteScroll')
+        self.source_palette_scroll.setWidgetResizable(True)
+        self.source_palette_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.source_palette_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.source_palette_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.source_palette_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        palette_outer.addWidget(self.source_palette_scroll)
+        self.source_palette_body = QWidget()
+        self.source_palette_body.setObjectName('sourcePaletteScrollBody')
+        palette_layout = QVBoxLayout(self.source_palette_body)
+        palette_layout.setContentsMargins(0, 4, 6, 4)
         palette_layout.setSpacing(5)
+        palette_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         title_row = QHBoxLayout()
         title_row.addWidget(_section_heading("Source Palette"))
+        self.source_palette_help = SectionHelpButton('source_palette_assignments')
+        title_row.addWidget(self.source_palette_help)
         title_row.addStretch()
-        self.tint_protected=QCheckBox('Tint Protected')
+        self.tint_protected=QCheckBox('Tint Assigned')
         self.tint_protected.setObjectName('tintProtectedToggle')
-        self.tint_protected.setToolTip('Optional teal tint on protected model faces. Off preserves original colors.')
+        self.tint_protected.setToolTip('Optional teal tint on source-color assigned faces. Off preserves original colors.')
         self.tint_protected.setChecked(False)
         self.tint_protected.setEnabled(False)
         self.tint_protected.toggled.connect(self.preview_surface.set_protected_overlay)
@@ -256,7 +278,7 @@ class MainWindow(QMainWindow):
         self.manage_protection_button=QPushButton('Assign Filament…')
         self.manage_protection_button.setObjectName('manageProtectionShortcut')
         self.manage_protection_button.setEnabled(False)
-        self.manage_protection_button.setToolTip('Choose one or more source colors first; opens the matching filament assignment, scanning source colors automatically if needed.')
+        self.manage_protection_button.setToolTip('Assign selected Source Palette colors to a physical filament without mixing.')
         self.manage_protection_button.clicked.connect(self._show_protection_controls)
         title_row.addWidget(self.manage_protection_button)
         self.clear_palette_button=QPushButton('Clear')
@@ -272,40 +294,86 @@ class MainWindow(QMainWindow):
         self.source_palette_message = _label(
             'Open a model to inspect its exact source color assignments.', 'bodyMuted', wrap=True)
         palette_layout.addWidget(self.source_palette_message)
-        self.source_palette_detail = _label('Click to select; Ctrl+click for multiple; click again or Esc to clear. Teal dots = protected.', 'helpText')
+        self.source_palette_detail = _label('Click or Shift-click for a range; Ctrl-click to toggle; right-click to assign. Teal dots = assigned.', 'helpText')
         self.source_palette_detail.setObjectName('sourcePaletteDetail')
         palette_layout.addWidget(self.source_palette_detail)
-        self.source_palette_scroll = QScrollArea()
-        self.source_palette_scroll.setObjectName('sourcePaletteScroll')
-        self.source_palette_scroll.setWidgetResizable(True)
-        self.source_palette_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.source_palette_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.source_palette_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.source_palette_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.assignment_panel = SourceAssignmentsPanel(self)
+        self.assignment_panel.setVisible(False)
+        self.assignment_panel.source_selected.connect(self._jump_to_assigned_color)
+        # FilamentsTab is created later by _sidebar(), so connect in _sidebar.
+        self.assigned_colors_summary = self.assignment_panel.toggle
         self.source_palette_content = QWidget()
         self.source_palette_content.setObjectName('sourcePaletteContent')
+        self.source_palette_content.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.source_palette_layout = QGridLayout(self.source_palette_content)
         self.source_palette_layout.setContentsMargins(0, 0, 6, 2)
         self.source_palette_layout.setHorizontalSpacing(5)
         self.source_palette_layout.setVerticalSpacing(5)
         self.source_palette_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.source_palette_scroll.setWidget(self.source_palette_content)
         self._source_palette_cells = []
         self._source_palette_columns = 0
         self._source_palette_selected = None
         self._source_palette_selected_colors = ()
+        self._source_palette_anchor = None
         self._source_palette_counts = {}
         self._preview_protected_colors=set()
-        self.source_palette_scroll.viewport().installEventFilter(self)
         self.source_palette_content.installEventFilter(self)
-        self.source_palette_scroll.setVisible(False)
-        palette_layout.addWidget(self.source_palette_scroll, stretch=1)
+        self.source_palette_content.setVisible(False)
+        palette_layout.addWidget(self.source_palette_content)
+        # Keep the color grid visible above the expandable assignment inspector.
+        palette_layout.addWidget(self.assignment_panel)
+        # The scrollable body may be taller than its content when the user
+        # expands the lower splitter pane. Without an explicit bottom stretch,
+        # QVBoxLayout allocates that extra height to labels, the swatch grid,
+        # and the assignment panel, creating huge gaps between them.
+        # Put all unused height AFTER the inspector instead: controls, swatches,
+        # and assigned filaments remain compact and top-aligned at every size.
+        palette_layout.addStretch(1)
+        # Set the body only after its widgets and layout have been assembled.
+        self.source_palette_scroll.setWidget(self.source_palette_body)
+        self.source_palette_scroll.viewport().installEventFilter(self)
+        self.assignment_panel.details_toggled.connect(self._resize_palette_for_assignments)
         self.preview_splitter.addWidget(palette_area)
         self.preview_splitter.setStretchFactor(0, 7)
         self.preview_splitter.setStretchFactor(1, 2)
         self.preview_splitter.setSizes([590, 135])
         content.addWidget(self.preview_splitter, stretch=1)
         return pane
+
+    def _resize_palette_for_assignments(self, expanded):
+        """Ensure the expanded inspector is visible without manual splitter dragging.
+
+        This changes only the two panes' screen space. It never modifies model
+        geometry, assignment preferences, or the forecast. The collapsed pane's
+        user-set size is restored unless the user resized it while expanded.
+        """
+        splitter = self.preview_splitter
+        sizes = splitter.sizes()
+        if len(sizes) != 2 or sum(sizes) <= 0:
+            return
+        total = sum(sizes)
+        palette = self._source_palette_area
+        if expanded:
+            self._assigned_inspector_previous_height = sizes[1]
+            # Make room for the swatch rows, the searchable tree and buttons.
+            # Never shrink the model pane below its existing 195px minimum.
+            model_min = max(195, splitter.widget(0).minimumHeight())
+            target = min(310, max(94, total - model_min))
+            palette.setMinimumHeight(target)
+            if sizes[1] < target:
+                splitter.setSizes([max(0, total - target), target])
+            self._assigned_inspector_auto_height = splitter.sizes()[1]
+        else:
+            palette.setMinimumHeight(94)
+            previous = self._assigned_inspector_previous_height
+            automatic = self._assigned_inspector_auto_height
+            # Preserve a manual drag performed while the inspector was open.
+            if (previous is not None and automatic is not None
+                    and abs(sizes[1] - automatic) <= 14):
+                splitter.setSizes([max(0, total - previous), previous])
+            self._assigned_inspector_previous_height = None
+            self._assigned_inspector_auto_height = None
 
     def _sidebar(self):
         sidebar = QFrame()
@@ -345,6 +413,8 @@ class MainWindow(QMainWindow):
         self.filaments_panel.planning_changed.connect(self._filament_planning_changed)
         self.filaments_panel.source_color_selected.connect(self._filament_color_selected)
         self.filaments_panel.protections_changed.connect(self._protections_updated)
+        self.assignment_panel.remove_requested.connect(self.filaments_panel.remove_source_assignments)
+        self.assignment_panel.clear_requested.connect(self._confirm_clear_all_assignments)
         self.confirm_filaments_tab_button = QPushButton('Use These Filaments for Forecast')
         self.confirm_filaments_tab_button.setObjectName('confirmFilamentsTab')
         self.confirm_filaments_tab_button.clicked.connect(self._confirm_filament_setup)
@@ -1294,9 +1364,12 @@ class MainWindow(QMainWindow):
         self._predicted_mesh = None
         self._predicted_filename = ''
         self.load_predicted_button.setEnabled(False)
-        self.source_palette_scroll.setVisible(False)
+        self.source_palette_content.setVisible(False)
+        self.source_palette_scroll.verticalScrollBar().setValue(0)
         self._source_palette_selected=None
         self._preview_protected_colors=set()
+        self.assignment_panel.setVisible(False)
+        self._source_palette_anchor = None
         self.clear_palette_button.setEnabled(False)
         self.manage_protection_button.setEnabled(False)
         self.tint_protected.setChecked(False)
@@ -1686,8 +1759,7 @@ class MainWindow(QMainWindow):
             # inside an active resize/layout pass.
             self._reflow_source_palette(event.size().width())
         if (event.type() == QEvent.Type.MouseButtonPress and
-            watched in (getattr(self, 'source_palette_content', None),
-                        getattr(self.source_palette_scroll, 'viewport', lambda: None)()) and
+            watched is getattr(self, 'source_palette_content', None) and
             event.button() == Qt.MouseButton.LeftButton):
             # Only empty background reaches the container; actual swatches
             # receive their own click events and remain selectable.
@@ -1712,8 +1784,8 @@ class MainWindow(QMainWindow):
             for i, cell in enumerate(cells):
                 grid.addWidget(cell, i // columns, i % columns)
             self._source_palette_columns = columns
-        # No fixed height: the user can drag the vertical splitter and the
-        # palette uses its own scrollbar only when its rows exceed that height.
+        # The grid contributes its natural row height to the ONE outer
+        # scrollbar; the inspector below remains reachable by wheel scrolling.
 
     def _on_palette_hover(self, color):
         if color in self._source_palette_counts:
@@ -1731,14 +1803,16 @@ class MainWindow(QMainWindow):
         elif self._source_palette_selected_colors:
             self._on_palette_hover(self._source_palette_selected_colors[0])
         else:
-            self.source_palette_detail.setText('Click to select; Ctrl+click for multiple; click again or Esc to clear. Teal dots = protected.')
+            self.source_palette_detail.setText('Click or Shift-click for a range; Ctrl-click to toggle; right-click to assign. Teal dots = assigned.')
 
     def _clear_palette_selection(self):
         self._select_palette_color(None)
 
     def _toggle_palette_color(self, color):
-        # Plain click replaces the set, or clears an already-sole selection.
-        self._select_palette_color(None if self._source_palette_selected_colors == (color,) else color)
+        # Plain click replaces the set or deselects a sole selected swatch.
+        value = None if self._source_palette_selected_colors == (color,) else color
+        self._source_palette_anchor = value
+        self._select_palette_color(value)
 
     def _toggle_palette_multi(self, color):
         selected = list(self._source_palette_selected_colors)
@@ -1746,22 +1820,80 @@ class MainWindow(QMainWindow):
             selected.remove(color)
         else:
             selected.append(color)
+        self._source_palette_anchor = color
         self._select_palette_colors(selected)
 
-    def _show_protection_controls(self):
-        # Preserve the Source Palette selection until the asynchronous scan
-        # populates the Filaments table; navigation alone cannot select rows.
-        selected = self._source_palette_selected_colors
-        if not selected or not self.state.model_path:
+    def _select_palette_range(self, color, additive=False):
+        """Shift-click selects a contiguous swatch range in visual order.
+
+        Ctrl+Shift adds the range to the existing selection. The anchor is kept
+        while Shift is held, so repeated Shift-click extends/shrinks predictably.
+        """
+        ordered = [cell.hex_color for cell in self._source_palette_cells]
+        if color not in ordered:
             return
-        self.tabs.setCurrentWidget(self.filaments_panel)
-        self.filaments_panel.prepare_source_assignments(selected)
-        def scroll_to_protection():
-            content=self.filaments_panel.content
-            label=self.filaments_panel.protected_intro
-            top=label.mapTo(content, label.rect().topLeft()).y()
-            self.filaments_panel.content_scroll.verticalScrollBar().setValue(max(0,top-35))
-        QTimer.singleShot(0, scroll_to_protection)
+        anchor = self._source_palette_anchor
+        if anchor not in ordered:
+            anchor = (self._source_palette_selected_colors[-1]
+                      if self._source_palette_selected_colors else color)
+        self._source_palette_anchor = anchor
+        a,b=ordered.index(anchor),ordered.index(color)
+        segment=ordered[min(a,b):max(a,b)+1]
+        selected=(list(self._source_palette_selected_colors)+segment
+                  if additive else segment)
+        self._select_palette_colors(list(dict.fromkeys(selected)))
+
+    def _show_protection_controls(self):
+        # Existing toolbar shortcut now opens the Source Palette dialog directly.
+        self.filaments_panel.open_assignment_dialog(self._source_palette_selected_colors)
+
+    def _source_palette_context_menu(self, color):
+        # Right-clicking one of the currently selected colors preserves the
+        # whole selection for bulk assignment and removal.
+        if color not in self._source_palette_selected_colors:
+            self._source_palette_anchor = color
+            self._select_palette_color(color)
+        selected = self._source_palette_selected_colors
+        assignments = self.filaments_panel.preferences.solid_assignments
+        selected_assigned = tuple(c for c in selected if c in assignments)
+        menu = QMenu(self)
+        assign = menu.addAction('Assign Filament…')
+        remove = menu.addAction(
+            f'Remove Selected Assignments ({len(selected_assigned)})')
+        remove.setEnabled(bool(selected_assigned))
+        menu.addSeparator()
+        clear_all = menu.addAction(f'Clear All Assignments… ({len(assignments)})')
+        clear_all.setEnabled(bool(assignments))
+        action = menu.exec(self.cursor().pos())
+        if action == assign:
+            self._show_protection_controls()
+        elif action == remove:
+            self.filaments_panel.remove_source_assignments(selected_assigned)
+        elif action == clear_all:
+            self._confirm_clear_all_assignments()
+
+    def _confirm_clear_all_assignments(self):
+        count = len(self.filaments_panel.preferences.solid_assignments)
+        if not count:
+            return
+        result = QMessageBox.question(
+            self, 'Clear Source Color Assignments',
+            f'Remove all {count} source-color assignments from this model? '
+            'The original model remains unchanged.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if result == QMessageBox.StandardButton.Yes:
+            self.filaments_panel.remove_source_assignments(
+                tuple(self.filaments_panel.preferences.solid_assignments))
+
+    def _jump_to_assigned_color(self, color):
+        """Clicking an inspector source HEX highlights and scrolls to its swatch."""
+        self._source_palette_anchor = color
+        self._select_palette_color(color)
+        for swatch in self._source_palette_cells:
+            if swatch.hex_color == color:
+                self.source_palette_scroll.ensureWidgetVisible(swatch)
+                break
 
     def _select_palette_color(self, color, sync_table=True):
         self._select_palette_colors([color] if color else (), sync_table=sync_table)
@@ -1802,6 +1934,8 @@ class MainWindow(QMainWindow):
 
     def _protections_updated(self, assignments):
         self._preview_protected_colors=set(assignments or ())
+        self.assignment_panel.set_assignments(
+            assignments, self.filaments_panel.options, self._source_palette_counts)
         self.tint_protected.setEnabled(bool(self._preview_protected_colors))
         if not self._preview_protected_colors:
             self.tint_protected.setChecked(False)
@@ -1827,10 +1961,14 @@ class MainWindow(QMainWindow):
         self._source_palette_columns = 0
         self._source_palette_selected = None
         self._source_palette_selected_colors = ()
+        self._source_palette_anchor = None
         self.clear_palette_button.setEnabled(False)
         self.manage_protection_button.setEnabled(False)
         palette = tuple(getattr(mesh, 'palette_counts', ()))
         self._source_palette_counts = dict(palette)
+        self.assignment_panel.set_assignments(
+            self.filaments_panel.preferences.solid_assignments,
+            self.filaments_panel.options, self._source_palette_counts)
         colors = len(palette)
         faces = sum(count for _, count in palette)
         if palette:
@@ -1847,8 +1985,10 @@ class MainWindow(QMainWindow):
             chip.left.connect(self._on_palette_leave)
             chip.chosen.connect(self._toggle_palette_color)
             chip.multi_chosen.connect(self._toggle_palette_multi)
+            chip.range_chosen.connect(self._select_palette_range)
+            chip.context_requested.connect(self._source_palette_context_menu)
             self._source_palette_cells.append(chip)
-        self.source_palette_scroll.setVisible(bool(palette))
+        self.source_palette_content.setVisible(bool(palette))
         if palette:
             self._reflow_source_palette()
             # Recalculate after show/layout activation so first render uses the

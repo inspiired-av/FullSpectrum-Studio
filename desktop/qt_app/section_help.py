@@ -91,15 +91,29 @@ Loading the file does not upload it to a server. Changes to its contents require
     'filament_colors': HelpTopic(
         'Filament Colors',
         'Choose usable filaments and require the ones that must be selected.',
-        """**Use** makes a filament available to the optimizer. **Require** guarantees a physical slot while allowing the filament in mixtures. Requiring also checks Use; unchecking Use clears Require. The number of required filaments cannot exceed **Physical slots**.
+        """**Use** makes a filament available to the optimizer. **Require** guarantees a physical slot and permits mixing. Require also checks Use; unchecking Use clears Require. The number of manually and automatically required filaments together cannot exceed **Physical slots**.
 
-Search by name, series or HEX. Ctrl/Shift-click rows, or use **Select Filtered** to select all visible rows. **Ctrl+A** in the filament table selects all visible rows for bulk actions; Ctrl/Shift-click adjusts the selection, and clicking the only selected row again clears it. The two bulk buttons switch between **Use Selected / Exclude Selected** and **Require Selected / Unrequire Selected**. Mixed selections are made consistent, not inverted individually. At least two distinct colors must remain enabled; invalid bulk actions never partially apply. Save Filaments persists your choices. **Save Filaments** persists choices; **Revert** restores saved settings. **Revert** restores saved settings."""),
+    Search by name, series or HEX. Ctrl+A in the filament table selects visible rows, Ctrl/Shift-click adjusts selection, and clicking a sole selected row again clears it. The two bulk buttons are **Use Selected / Exclude Selected** and **Require Selected / Unrequire Selected**. Invalid batches do not partially apply. **Save Filaments** persists your choices; **Revert** restores saved settings.
+
+    A source-color assignment in **Source Palette** automatically requires its physical filament and locks Use/Require while assigned. The assignment and requirement are model-specific and are not saved as a permanent manual Require selection."""),
+    'source_palette_assignments': HelpTopic(
+        'Source Palette and Filament Assignments',
+        'Right-click a source color to force one unmixed filament and reserve that filament from all mixtures.',
+        """**Source Palette** shows the original colors in your model. Click a swatch to select it, Ctrl-click to add/remove individual swatches, or Shift-click to select a contiguous range. Right-click to choose **Assign Filament…** and search by name, brand, series, or HEX.
+
+**Assign Filament** maps every face using that exact source HEX to a specific physical filament, **without mixing**. The assigned filament is automatically **required** (Use and Require are locked while assigned) and **cannot participate in mixed recipes anywhere else** in the model. It can still print direct, unmixed colors. Every occurrence of the same source HEX is affected, even when it appears in different model regions.
+
+**Assigned Colors** appears **below** the swatches. Expand it to browse a searchable list grouped by destination filament, view source-color swatches, HEX values and face counts, or select entries to highlight them in the model. Use **Remove Selected** or **Clear All** to remove assignments. Manually required filaments stay required after their last assignment is removed; automatic requirements do not become permanent manual pins.
+
+Assignments apply only to the current model, are not stored in the filament library, and do not edit the original 3MF. This feature currently supports **standard material-colored 3MF** source colors; native painted/object-color inputs are not assignable. The **Tint Assigned** checkbox changes the preview overlay only, not export colors. Forecast and native export must both honor assigned colors and the no-mix reservation. Verify slicer results before printing."""),
     'protect_solid_colors': HelpTopic(
-        'Protect Solid Colors',
-        'Assign exact source colors to specific physical filaments.',
-        """For supported standard material-colored 3MF files, choose one or more source colors in the automatically populated table, select an enabled filament, then click **Protect Selected**. **Remove Protection** clears an assignment.
+        'Source Color Assignments',
+        'Assign source HEX colors directly to physical filaments using Source Palette.',
+        """Open a standard material-colored 3MF. In **Source Palette**, right-click a color swatch and choose **Assign Filament…**, then search and choose a physical filament. You can also select multiple swatches and use the assignment shortcut. Right-click an assigned swatch to remove its assignment.
 
-The source palette shares the selection. Protections apply to the selected model, not every future model. Native painted faces may be inspectable but not safely assignable. Visual tint does not change or export a project."""),
+    The assigned source HEX prints in that physical filament without mixing. The assigned filament is required but cannot participate in any mixed recipes elsewhere. It remains available for direct, unmixed regions. Assigned Colors lists active mappings; the Filaments table shows a lock icon and assigned source HEX codes in a tooltip.
+
+    Assignments affect **every occurrence** of an exact source HEX and reset on a new model. Native painted projects may be inspected but do not support source-color assignment yet. This feature does not change original model geometry."""),
 }
 
 

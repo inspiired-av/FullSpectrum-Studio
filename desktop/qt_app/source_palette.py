@@ -31,6 +31,8 @@ class PaletteSwatch(QLabel):
     left = Signal()
     chosen = Signal(str)
     multi_chosen = Signal(str)
+    context_requested = Signal(str)
+    range_chosen = Signal(str, bool)
 
     def __init__(self, hex_color, face_count, parent=None):
         super().__init__('', parent)
@@ -49,7 +51,7 @@ class PaletteSwatch(QLabel):
         self._refresh_style()
 
     def _update_tooltip(self):
-        status = 'Protected source color' if self._protected else 'Not protected'
+        status = 'Assigned to a physical filament' if self._protected else 'No source-color assignment'
         self.setToolTip(f'{self.hex_color} · {self.face_count:,} faces · {status}')
 
     def paintEvent(self, event):
@@ -96,16 +98,30 @@ class PaletteSwatch(QLabel):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            (self.multi_chosen if event.modifiers() & Qt.KeyboardModifier.ControlModifier
-             else self.chosen).emit(self.hex_color)
+            mods=event.modifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                self.range_chosen.emit(
+                    self.hex_color, bool(mods & Qt.KeyboardModifier.ControlModifier))
+            else:
+                (self.multi_chosen if mods & Qt.KeyboardModifier.ControlModifier
+                 else self.chosen).emit(self.hex_color)
             event.accept()  # Keep the click from bubbling into the empty-background handler.
+            return
+        if event.button() == Qt.MouseButton.RightButton:
+            self.context_requested.emit(self.hex_color)
+            event.accept()
             return
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
-            (self.multi_chosen if event.modifiers() & Qt.KeyboardModifier.ControlModifier
-             else self.chosen).emit(self.hex_color)
+            mods=event.modifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                self.range_chosen.emit(
+                    self.hex_color, bool(mods & Qt.KeyboardModifier.ControlModifier))
+            else:
+                (self.multi_chosen if mods & Qt.KeyboardModifier.ControlModifier
+                 else self.chosen).emit(self.hex_color)
             event.accept()
         else:
             super().keyPressEvent(event)

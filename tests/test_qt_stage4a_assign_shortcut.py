@@ -20,7 +20,7 @@ class SourceContractTests(unittest.TestCase):
         main = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'MainWindow')
         method = next(n for n in main.body if isinstance(n, ast.FunctionDef) and n.name == '_show_protection_controls')
         text = ast.get_source_segment(code, method)
-        self.assertIn('prepare_source_assignments(selected)', text)
+        self.assertIn('open_assignment_dialog(self._source_palette_selected_colors)', text)
         self.assertIn('self._source_palette_selected_colors', text)
         self.assertIn("QPushButton('Assign Filament…')", code)
 

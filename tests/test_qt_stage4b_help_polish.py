@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / 'desktop/qt_app'
 KEEP = {
     # Stage 4C adds one meaningful help button beside the preview mode selector.
-    'preview_modes',
+    'preview_modes', 'source_palette_assignments',
     'live_forecast','expected_palette',
     'color_optimization','native_project_template','advanced_settings',
     'filament_source','filament_colors','protect_solid_colors',

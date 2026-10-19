@@ -28,7 +28,7 @@ class SourceTests(unittest.TestCase):
         self.assertIn('self.filaments.setMinimumHeight(230)', code)
         self.assertIn('self.solid_table.setMinimumHeight(178)', code)
         self.assertIn('lay.addWidget(self.filaments, 3)', code)
-        self.assertIn('lay.addWidget(self.solid_table, 2)', code)
+        self.assertIn('compat.addWidget(self.solid_table, 2)', code)
 
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'PySide6 not installed')
@@ -46,7 +46,7 @@ class QtGeometryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         plan = PlanPreferences(Path(self.tmp.name) / 'settings.json')
         self.tab = FilamentsTab(plan, settings_path=plan.path)
-        self.tab.resize(470, 510)
+        self.tab.resize(470, 330)
         self.tab.show()
         self.app.processEvents()
         self.addCleanup(self.tab.close)
@@ -57,15 +57,14 @@ class QtGeometryTests(unittest.TestCase):
         table_end = self.tab.filaments.mapTo(self.tab.content, QPoint(0, self.tab.filaments.height())).y()
         bulk_start = self.tab.bulk_use_button.mapTo(self.tab.content, QPoint(0, 0)).y()
         self.assertGreaterEqual(bulk_start, table_end)
-        solid_end = self.tab.solid_table.mapTo(self.tab.content, QPoint(0, self.tab.solid_table.height())).y()
-        assign_start = self.tab.target.mapTo(self.tab.content, QPoint(0, 0)).y()
-        self.assertGreaterEqual(assign_start, solid_end)
+        # Source-color assignment controls moved to the Source Palette.
+        self.assertFalse(self.tab._assignment_compat.isVisible())
 
     def test_taller_window_expands_both_tables(self):
         self.tab.resize(470, 1350)
         self.app.processEvents()
         self.assertGreater(self.tab.filaments.height(), 230)
-        self.assertGreater(self.tab.solid_table.height(), 178)
+        self.assertFalse(self.tab._assignment_compat.isVisible())
 
     def test_many_colors_scroll_inside_table(self):
         self.tab.options = [dict(key=f'key-{i}',name=f'Filament {i}',series='PLA',

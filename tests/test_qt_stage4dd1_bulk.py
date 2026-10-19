@@ -105,15 +105,21 @@ class BulkSelectionIntegration(unittest.TestCase):
         self.assertFalse(self.panel.preferences.pinned)
         self.assertFalse(self.events)
 
-    def test_excluding_assignment_target_emits_protection_once(self):
+    def test_excluding_assignment_target_is_rejected_without_losing_assignment(self):
+        # D2 does not silently discard exact-color assignments when a user
+        # tries to exclude their locked physical filament.
         self.panel.preferences.solid_assignments={'#AABBCC':self.options[0]['key']}
         protection_events=[]
         self.panel.protections_changed.connect(protection_events.append)
         self._select_rows(0)
-        self.panel._bulk_change('exclude')
-        self.assertEqual(protection_events,[{}])
-        self.assertEqual(self.events,[True])
-        self.assertNotIn('#AABBCC',self.panel.preferences.solid_assignments)
+        with patch('desktop.qt_app.filaments_tab.QMessageBox.warning') as warning:
+            self.panel._bulk_change('exclude')
+        warning.assert_called_once()
+        self.assertEqual(protection_events,[])
+        self.assertEqual(self.events,[])
+        self.assertEqual(self.panel.preferences.solid_assignments,
+                         {'#AABBCC':self.options[0]['key']})
+        self.assertNotIn(self.options[0]['key'],self.panel.preferences.disabled)
 
     def test_require_makes_excluded_filament_usable(self):
         self._select_rows(3)

@@ -27,7 +27,7 @@ class CodeCompatibilityTests(unittest.TestCase):
         self.assertIn('def paintEvent(self, event):',swatch)
         self.assertIn('if self._protected:',swatch)
         self.assertIn('painter.drawEllipse(',swatch)
-        self.assertIn('Protected source color',swatch)
+        self.assertIn('Assigned to a physical filament',swatch)
 
     def test_selection_has_clear_and_shortcut(self):
         ui=(ROOT/'desktop/qt_app/main_window.py').read_text(encoding='utf-8')
@@ -139,11 +139,13 @@ class QtBehaviorTests(unittest.TestCase):
                 w._source_palette_counts = {'#FF0000': 4, '#0000FF': 3}
                 w._select_palette_colors(('#FF0000', '#0000FF'))
                 self.assertTrue(w.manage_protection_button.isEnabled())
-                with (patch.object(w.filaments_panel, 'prepare_source_assignments') as prepare,
-                      patch.object(w.filaments_panel, 'on_selected')):
+                # D2 launches a model-local dialog instead of navigating to
+                # the removed Protect Solid Colors section. Mock that dialog
+                # to avoid blocking the headless Qt test indefinitely.
+                with patch.object(w.filaments_panel, 'open_assignment_dialog') as open_dialog:
                     w.manage_protection_button.click()
-                self.assertIs(w.tabs.currentWidget(), w.filaments_panel)
-                prepare.assert_called_once_with(('#FF0000', '#0000FF'))
+                self.assertIsNot(w.tabs.currentWidget(), w.filaments_panel)
+                open_dialog.assert_called_once_with(('#FF0000', '#0000FF'))
                 self.assertEqual(w.tabs.count(), 3)
             finally:
                 w.close()

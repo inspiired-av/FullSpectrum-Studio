@@ -471,8 +471,19 @@ def mix_recipe_index_for_signature(signature, mix_model="bambu",
                 recipes.append((component_slots,ratios,mix(component_colors,ratios,mix_model)))
     return tuple(recipes)
 
-def mix_recipe_index(anchors, mix_model="bambu", pair_family="standard2", triple_family="none"):
-    return mix_recipe_index_for_signature(anchor_signature(anchors),mix_model,pair_family,triple_family)
+def mix_recipe_index(anchors, mix_model="bambu", pair_family="standard2", triple_family="none",
+                     reserved_filament_keys=None):
+    """Return printable mixes excluding every source-assigned physical filament.
+
+    Component slot numbers remain those of the ORIGINAL anchor list; directly
+    assigned and other solid slots remain usable in the physical palette.
+    """
+    recipes=mix_recipe_index_for_signature(anchor_signature(anchors),mix_model,pair_family,triple_family)
+    if not reserved_filament_keys:
+        return recipes
+    reserved={i+1 for i,anchor in enumerate(anchors)
+              if any(anchor_matches_key(anchor,key) for key in reserved_filament_keys)}
+    return tuple(recipe for recipe in recipes if not reserved.intersection(recipe[0]))
 
 # Target-aware in-memory recipe database for anchor search. The output 3MF can
 # hold up to 32 paint slots, but the hard part is choosing the physical anchors:
@@ -2126,10 +2137,11 @@ def nearest_anchor_error(color, anchors):
     return min((dist(color,anchor_color(anchor)),i+1,anchor_name(anchor),anchor_color(anchor))
                for i,anchor in enumerate(anchors))
 
-def best_mix_recipe(color, anchors, mix_model="bambu", allow_three=True, high_fidelity=False):
+def best_mix_recipe(color, anchors, mix_model="bambu", allow_three=True, high_fidelity=False,
+                    reserved_filament_keys=None):
     best_err=999999.0; best=None
     pair_family="fine2" if high_fidelity else "standard2"
-    for component_slots,ratios,preview in mix_recipe_index(anchors,mix_model,pair_family,"none"):
+    for component_slots,ratios,preview in mix_recipe_index(anchors,mix_model,pair_family,"none",reserved_filament_keys):
         d=dist(color,preview)
         if d<best_err:
             best_err=d; best=(list(component_slots),list(ratios),preview)
@@ -2140,7 +2152,7 @@ def best_mix_recipe(color, anchors, mix_model="bambu", allow_three=True, high_fi
     if allow_three and best_err>three_color_trigger:
         best3_err=best_err; best3=best
         triple_family="fine3" if high_fidelity else "standard3"
-        for component_slots,ratios,preview in mix_recipe_index(anchors,mix_model,"none",triple_family):
+        for component_slots,ratios,preview in mix_recipe_index(anchors,mix_model,"none",triple_family,reserved_filament_keys):
             d=dist(color,preview)
             if d<best3_err:
                 best3_err=d; best3=(list(component_slots),list(ratios),preview)
@@ -2287,8 +2299,10 @@ def palette_usage_stats(rows, usage, quality_bias):
     return mixed_slots,mixed_share,weak_share
 
 def palette_selection_score(old_colors, usage, anchors, quality_bias, mix_model="bambu", reference=None,
-                            planner_mode="best"):
-    newc,_,_,_,_,rows=build_palette(old_colors,anchors,usage,quality_bias,mix_model,planner_mode)
+                            planner_mode="best", reserved_filament_keys=None):
+    newc,_,_,_,_,rows=build_palette(
+        old_colors,anchors,usage,quality_bias,mix_model,planner_mode,
+        reserved_filament_keys=reserved_filament_keys)
     metrics=quality_metrics(rows,usage,old_colors,reference,mix_model)
     mixed_slots,mixed_share,weak_share=palette_usage_stats(rows,usage,quality_bias)
     practical_pressure=(100-clamp_quality_bias(quality_bias))/100
@@ -2306,7 +2320,7 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
                    custom_catalog_path=None, reference=None, mix_model="bambu",
                    quality_bias=DEFAULT_QUALITY_BIAS, planner_mode="best",
                    material_families=None, pinned_anchor_keys=None,
-                   allowed_anchor_keys=None):
+                   allowed_anchor_keys=None, reserved_filament_keys=None):
     planner_mode=normalize_planner_mode(planner_mode)
     material_families=normalize_material_families(material_families)
     pinned_anchor_keys=normalize_anchor_keys(pinned_anchor_keys)
@@ -2377,6 +2391,10 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
             return cached
         ah=[anchor_color(anchor) for anchor in anchors]
         anchor_colors=set(ah)
+        # The hint database is global and includes all pair/triple combinations.
+        # Never score a prohibited mixture as feasible.
+        mixing_colors={anchor_color(anchor) for anchor in anchors
+                       if not any(anchor_matches_key(anchor,key) for key in (reserved_filament_keys or ()))}
         s=0.0
         for target_index,(_,c,w) in enumerate(targets):
             direct=min(dist(c,a) for a in ah)
@@ -2385,7 +2403,7 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
                 for components,error in score_hints[target_index]:
                     if error>=candidate:
                         break
-                    if all(component in anchor_colors for component in components):
+                    if all(component in mixing_colors for component in components):
                         candidate=error
                         break
             s+=(w/target_total)*candidate
@@ -2422,7 +2440,8 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
         cached=full_palette_score_cache.get(key)
         if cached is not None:
             return cached
-        value=palette_selection_score(old_colors,usage,current,quality_bias,mix_model,reference,planner_mode)[0]
+        value=palette_selection_score(old_colors,usage,current,quality_bias,mix_model,reference,planner_mode,
+                                      reserved_filament_keys)[0]
         full_palette_score_cache[key]=value
         return value
     def local_optimize(current, fixed_count=0):
@@ -2564,7 +2583,7 @@ def normalize_max_output_colors(value):
 
 def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_BIAS,
                   mix_model="bambu", planner_mode="best", protected_slots=None,
-                  max_output_colors="auto"):
+                  max_output_colors="auto", reserved_filament_keys=None):
     planner_mode=normalize_planner_mode(planner_mode)
     real_count=len(anchors)
     requested_output=normalize_max_output_colors(max_output_colors)
@@ -2591,6 +2610,9 @@ def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_
         min_gain=min(min_gain,0.15)
     mix_candidates=[]
     protected_slots=protected_slots or {}
+    # Exact source-color assignments automatically reserve their filament
+    # from ALL mixed recipes, not just from those particular source faces.
+    reserved_filament_keys=set(reserved_filament_keys or ()) | set(protected_slots.values())
     for old_slot,target in enumerate(old_colors, start=1):
         if old_slot in protected_slots:
             forced_slot, row=solid_anchor_choice(
@@ -2602,12 +2624,17 @@ def build_palette(old_colors, anchors, usage=None, quality_bias=DEFAULT_QUALITY_
             rows_by_slot[old_slot]=row
             continue
         direct_err,direct_slot,direct_name,direct_hex=nearest_anchor_error(target,anchors)
+        # Preserve the legacy mixer call signature if nothing is reserved.
+        # Tests and third-party hooks may provide a five-argument mixer mock.
+        mixing_kwargs = ({'reserved_filament_keys': reserved_filament_keys}
+                         if reserved_filament_keys else {})
         cs,rs,preview,mix_err=best_mix_recipe(
             target,
             anchors,
             mix_model,
             allow_three=quality_bias>=70,
             high_fidelity=high_fidelity,
+            **mixing_kwargs,
         )
         gain=direct_err-mix_err
         weight=float((usage or {}).get(old_slot,1.0))
@@ -2990,7 +3017,7 @@ def select_smart_palette(old_colors, usage, mode, inventory, palette_source, rea
                          custom_catalog_path=None, reference=None, mix_model="bambu", planner_mode="best",
                          progress=None, material_families=None, pinned_anchor_keys=None,
                          allowed_anchor_keys=None, protected_slots=None,
-                         max_output_colors="auto"):
+                         max_output_colors="auto", reserved_filament_keys=None):
     planner_mode=normalize_planner_mode(planner_mode)
     candidates=list(SMART_QUALITY_CANDIDATES)
     if mode=="cmykw":
@@ -3021,7 +3048,7 @@ def select_smart_palette(old_colors, usage, mode, inventory, palette_source, rea
             anchors=select_anchors(
                 old_colors,usage,mode,inventory,palette_source,real_slots,
                 custom_catalog_path,reference,mix_model,quality_bias,planner_mode,
-                material_families,pinned_anchor_keys,allowed_anchor_keys
+                material_families,pinned_anchor_keys,allowed_anchor_keys,reserved_filament_keys
             )
             palette=build_palette(old_colors,anchors,usage,quality_bias,mix_model,planner_mode,
                                   protected_slots=protected_slots,
@@ -3544,6 +3571,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
     pinned_anchor_keys=normalize_anchor_keys(pinned_anchor_keys)
     allowed_anchor_keys=normalize_anchor_keys(allowed_anchor_keys)
     solid_color_overrides=normalize_solid_overrides(solid_color_overrides)
+    reserved_filament_keys=set(solid_color_overrides.values())
     max_output_colors=normalize_max_output_colors(max_output_colors)
     if solid_color_overrides:
         if infile.suffix.lower() != ".3mf" or not is_standard_colored_3mf(infile):
@@ -3750,7 +3778,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                 old,usage,mode,inventory,palette_source,real_slots,
                 custom_catalog_path,reference_result,mix_model,planner_mode,progress,
                 material_families,pinned_anchor_keys,allowed_anchor_keys,protected_slots,
-                max_output_colors=max_output_colors
+                max_output_colors=max_output_colors, reserved_filament_keys=reserved_filament_keys
             )
             quality_bias=plan["qualityBias"]
             anchors=plan["anchors"]
@@ -3766,11 +3794,12 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             progress(0.22,f"Generating {planner_mode} anchors from painted colors and " + source_label)
             anchors=select_anchors(old, usage, mode, inventory, palette_source,real_slots,
                                    custom_catalog_path,reference_result,mix_model,quality_bias,planner_mode,
-                                   material_families,pinned_anchor_keys,allowed_anchor_keys)
+                                   material_families,pinned_anchor_keys,allowed_anchor_keys,reserved_filament_keys)
             progress(0.34,"Building mixes with useful predicted visual gain")
             newc,ism,comps,ratios,old_slot_to_new_slot,rows=build_palette(
                 old,anchors,usage,quality_bias,mix_model,planner_mode,
-                protected_slots=protected_slots, max_output_colors=max_output_colors
+                protected_slots=protected_slots, max_output_colors=max_output_colors,
+                reserved_filament_keys=reserved_filament_keys
             )
         if direct_source is not None:
             # Phase 3 v1 retained nearest PHYSICAL fallbacks for any original
@@ -3801,20 +3830,23 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                     anchors,mix_model,
                     "fine2" if best_mode else "standard2",
                     "fine3" if best_mode and quality_bias>=70 else
-                    "standard3" if quality_bias>=70 else "none"
+                    "standard3" if quality_bias>=70 else "none",
+                    reserved_filament_keys=reserved_filament_keys
                 )
                 if best_mode:
                     # Finer printable two- and three-filament ratios. Bambu's
                     # loaded swatch uses integer-percent ratio rounding.
                     anchor_hex=[anchor_color(anchor) for anchor in anchors]
-                    for a,b in combinations(range(1,len(anchors)+1),2):
+                    mixing_slots=[i+1 for i,anchor in enumerate(anchors)
+                                  if not any(anchor_matches_key(anchor,key) for key in reserved_filament_keys)]
+                    for a,b in combinations(mixing_slots,2):
                         for percent in range(1,100,2):
                             mix_ratio=(percent/100,1-percent/100)
                             yield (a,b),mix_ratio,mix(
                                 (anchor_hex[a-1],anchor_hex[b-1]),mix_ratio,mix_model
                             )
                     if quality_bias>=70:
-                        for a,b,c in combinations(range(1,len(anchors)+1),3):
+                        for a,b,c in combinations(mixing_slots,3):
                             for x in range(1,19):
                                 for y in range(1,20-x):
                                     z=20-x-y
@@ -3841,6 +3873,15 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                 f"{len(newc)}/{budget} total slots."
             )
         real_count=len(anchors)
+        reserved_slots={i+1 for i,anchor in enumerate(anchors)
+                        if any(anchor_matches_key(anchor,key) for key in reserved_filament_keys)}
+        # Final forecast/export assertion: no optimizer path may silently
+        # re-introduce a reserved filament as a mixed-recipe ingredient.
+        for slot,(mixed,components) in enumerate(zip(ism,comps),start=1):
+            if mixed=="1" and reserved_slots.intersection(
+                    int(item) for item in str(components).split(",") if item.strip()):
+                raise RuntimeError(
+                    f"Mixed slot {slot} illegally references a source-assigned filament")
         newn=len(newc)
         if max_output_colors != "auto" and newn < max_output_colors:
             warnings.append(

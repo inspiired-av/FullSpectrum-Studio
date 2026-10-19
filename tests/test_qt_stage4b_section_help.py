@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / 'desktop' / 'qt_app'
 REQUIRED = (
     # Stage 4C view modes merit a context-specific help button.
-    'preview_modes',
+    'preview_modes', 'source_palette_assignments',
     'live_forecast', 'expected_palette',
     'color_optimization', 'native_project_template',
     'advanced_settings', 'filament_source', 'filament_colors',

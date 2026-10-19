@@ -121,6 +121,8 @@ class FilamentsTab(QWidget):
         self._source_scan_busy = False
         self._source_scan_attempted = False
         self._pending_assignment_colors = ()
+        self._pending_dialog_colors = ()
+        self._source_kind = None
         self._workers = []
         self._rows = []
         self._changing = False
@@ -231,17 +233,20 @@ class FilamentsTab(QWidget):
         actions.addWidget(self.revert_button)
         lay.addLayout(actions)
 
-        lay.addSpacing(6)
-        lay.addWidget(help_heading('protect_solid_colors', 'PROTECT SOLID COLORS'))
+        # Hidden compatibility layer for legacy scanner/test APIs.
+        # No Protect Solid Colors controls are displayed in the Filaments tab.
+        self._assignment_compat = QWidget(self)
+        compat = QVBoxLayout(self._assignment_compat)
+        compat.addWidget(help_heading('protect_solid_colors', 'PROTECT SOLID COLORS'))
         self.protected_intro = _text('Assign source colors to enabled physical filaments. '
                                       'Assignments apply only to the selected model.', 'bodyMuted')
-        lay.addWidget(self.protected_intro)
+        compat.addWidget(self.protected_intro)
         # The same opened model supplies the Source Palette and this table.
         # A read-only, authoritative protection scan runs automatically after
         # the viewport loads; a second manual Scan button is unnecessary.
         self.protected_count = _text('Open a 3MF to load source colors automatically.', 'helpText')
         self.protected_count.setObjectName('sourceColorLoadStatus')
-        lay.addWidget(self.protected_count)
+        compat.addWidget(self.protected_count)
         self.solid_table = ToggleSourceTable(0, 3)
         self.solid_table.setObjectName('solidColorTable')
         self.solid_table.setHorizontalHeaderLabels(['Source color', 'Faces', 'Assigned filament'])
@@ -255,10 +260,10 @@ class FilamentsTab(QWidget):
         self.solid_table.setMinimumHeight(178)
         self.solid_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.solid_table.itemSelectionChanged.connect(self._selection_changed)
-        lay.addWidget(self.solid_table, 2)
+        compat.addWidget(self.solid_table, 2)
         self.target = WheelSafeComboBox()
         self.target.setMinimumWidth(100)
-        lay.addWidget(self.target)
+        compat.addWidget(self.target)
         assign_row = QHBoxLayout()
         self.protect_button = QPushButton('Protect Selected')
         self.protect_button.clicked.connect(self._protect)
@@ -266,12 +271,12 @@ class FilamentsTab(QWidget):
         self.remove_button = QPushButton('Remove Protection')
         self.remove_button.clicked.connect(self._remove_protection)
         assign_row.addWidget(self.remove_button)
-        lay.addLayout(assign_row)
+        compat.addLayout(assign_row)
         self.bulk_hint = _text('Multiple source colors assigned to one filament will share its output material color.', 'templateWarning')
         self.bulk_hint.setVisible(False)
-        lay.addWidget(self.bulk_hint)
-        lay.addWidget(_text('Model highlighting will be connected in Stage 3. '
-                            'Protected colors will be passed to the engine in Stage 4.', 'helpText'))
+        compat.addWidget(self.bulk_hint)
+        # Historical help and buttons remain internal only until old contracts retire.
+        self._assignment_compat.hide()
         self._update_actions()
         self.filaments.itemSelectionChanged.connect(self._update_actions)
         self.filaments.select_visible_requested.connect(self._select_filtered_filaments)
@@ -428,7 +433,7 @@ class FilamentsTab(QWidget):
         self.load_progress.setVisible(False)
         self._filter()
         self._refresh_targets()
-        self._sync_status()
+        self._sync_assignment_widgets()
         # Emit success only after table rows and search are fully usable.
         self.activity_event.emit('success', 'Filament source',
                                  f'Loaded {len(self.options)} available filament colors.')
@@ -468,7 +473,9 @@ class FilamentsTab(QWidget):
 
     def _read_rows(self):
         enabled = {o['key'] for o, e, p in self._rows if e.isChecked()}
-        pinned = {o['key'] for o, e, p in self._rows if p.isChecked()}
+        assigned=set(self.preferences.solid_assignments.values())
+        pinned = {o['key'] for o, e, p in self._rows if p.isChecked()
+                  and (o['key'] not in assigned or o['key'] in self.preferences.pinned)}
         return enabled, pinned
 
     def _accept_table(self, show_error):
@@ -494,7 +501,7 @@ class FilamentsTab(QWidget):
             active,pinned = self._read_rows() if table_pending else (
                 {o['key'] for o in self.options if self.preferences.selected(o['key'])},
                 {o['key'] for o in self.options if self.preferences.is_pinned(o['key'])})
-            self.summary.setText(f'{len(active)} of {len(self.options)} usable · {len(pinned)} required'
+            self.summary.setText(f'{len(active)} of {len(self.options)} usable · {len(pinned | set(self.preferences.solid_assignments.values()))} required'
                                  + (' · Unsaved changes' if table_pending or self.preferences.is_dirty else ''))
         self._update_actions()
 
@@ -590,7 +597,13 @@ class FilamentsTab(QWidget):
         if before == after:
             return  # A no-op must not invalidate an expensive forecast.
         usable = {opt['key'] for (opt, _e, _r), (e, r) in zip(self._rows, after) if e}
-        required = {opt['key'] for (opt, _e, _r), (e, r) in zip(self._rows, after) if r}
+        auto=set(self.preferences.solid_assignments.values())
+        required = {opt['key'] for (opt, _e, _r), (e, r) in zip(self._rows, after)
+                    if r and (opt['key'] not in auto or opt['key'] in self.preferences.pinned)}
+        if action in ('exclude','optional') and any(self._rows[row][0]['key'] in auto for row in rows):
+            QMessageBox.warning(self, 'Assigned Filament',
+                                'Remove the source-color assignment before excluding or unrequiring this filament.')
+            return
         from copy import copy
         preview = copy(self.preferences)
         preview.disabled = set(self.preferences.disabled)
@@ -611,6 +624,7 @@ class FilamentsTab(QWidget):
         finally:
             self._changing = previous_changing
         self._table_changed()  # One snapshot, one planning_changed emission.
+        self._sync_assignment_widgets()
 
     def _filter(self):
         # Filtering while Qt has not finished creating row items is unsafe and
@@ -691,6 +705,8 @@ class FilamentsTab(QWidget):
         self.source_colors={}
         self.source_color_selected.emit(None)
         self.protections_changed.emit({})
+        self._pending_dialog_colors=()
+        self._source_kind=None
         self.protected_intro.setObjectName('bodyMuted')
         self.protected_intro.style().unpolish(self.protected_intro)
         self.protected_intro.style().polish(self.protected_intro)
@@ -701,6 +717,13 @@ class FilamentsTab(QWidget):
             else 'Solid-color assignment requires an original 3MF source.'
         )
         self._update_actions()
+        # FilamentPreferences.use_model() clears the old model's assignments.
+        # The current table rows survive model switches, so clear their stale
+        # locks/automatic Require checkmarks without changing manual pins.
+        # If a library is still populating, its completion hook performs the
+        # same synchronization after all row widgets have been created.
+        if self._rows and not self._population_active:
+            self._sync_assignment_widgets()
 
     def auto_load_source_colors(self):
         """Start one authoritative scan for the current 3MF, after preview loading.
@@ -783,6 +806,7 @@ class FilamentsTab(QWidget):
         self.activity_event.emit('success', 'Source colors',
                                  f'Found {len(self.source_colors)} source colors in the selected model.')
         kind = getattr(data, 'source_kind', None)
+        self._source_kind=kind
         native = kind in ('native_object_colors', 'native_painted_faces')
         self.protected_intro.setObjectName('templateWarning' if native else 'bodyMuted')
         self.protected_intro.style().unpolish(self.protected_intro)
@@ -805,6 +829,10 @@ class FilamentsTab(QWidget):
         self._populate_solid_colors()
         self._apply_pending_assignment_selection()
         self.protections_changed.emit(dict(self.preferences.solid_assignments))
+        if self._pending_dialog_colors:
+            colors=self._pending_dialog_colors
+            self._pending_dialog_colors=()
+            QTimer.singleShot(0, lambda colors=colors: self.open_assignment_dialog(colors))
 
     def _populate_solid_colors(self):
         selected_colors = set(self._selected_colors())
@@ -888,6 +916,105 @@ class FilamentsTab(QWidget):
                     self.target.addItem(f"{opt.get('name') or opt['key']} · {opt.get('color','')}",opt['key'])
         index=self.target.findData(previous)
         if index>=0:self.target.setCurrentIndex(index)
+        self._update_actions()
+
+    def open_assignment_dialog(self, colors):
+        """Open a searchable assignment dialog from the Source Palette."""
+        colors=tuple(dict.fromkeys(str(c).upper() for c in colors if c))
+        if not colors or not self.model_path:
+            return
+        if not self.options or self._population_active:
+            # No modal QMessageBox: legacy/offscreen tests and users switching
+            # libraries must not be blocked by a synchronous popup.
+            self.activity_event.emit('info', 'Filament Library',
+                                     'Wait for the filament library to finish loading.')
+            return
+        if not self.source_colors:
+            if self._source_scan_busy:
+                self._pending_dialog_colors=colors
+                return
+            if not self._source_scan_attempted:
+                self._pending_dialog_colors=colors
+                self.auto_load_source_colors()
+                return
+            QMessageBox.information(self, 'Unsupported source',
+                                    'This model does not have assignable material-colored 3MF source colors.')
+            return
+        if self._source_kind != 'material_faces':
+            QMessageBox.information(self, 'Unsupported source',
+                                    'Assignments currently require a standard material-colored 3MF. '
+                                    'Native painted/object colors are display-only.')
+            return
+        if any(c not in self.source_colors for c in colors):
+            QMessageBox.warning(self, 'Source Palette', 'Source colors changed; reselect the swatches.')
+            return
+        from desktop.qt_app.source_color_assignment_dialog import SourceColorAssignmentDialog
+        dialog=SourceColorAssignmentDialog(colors,self.options,self.preferences.solid_assignments,self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        key=dialog.selected_key()
+        if not key:
+            return
+        from copy import copy
+        proposed=copy(self.preferences)
+        proposed.disabled=set(self.preferences.disabled)
+        proposed.pinned=set(self.preferences.pinned)
+        proposed.solid_assignments=dict(self.preferences.solid_assignments)
+        try:
+            for color in colors:
+                proposed.assign(color,key,self.source_colors,self.options,self._max_pins())
+            enabled={o['key'] for o in self.options if o['key'] not in proposed.disabled}
+            manual={o['key'] for o in self.options if o['key'] in proposed.pinned}
+            proposed.apply(self.options,enabled,manual,self._max_pins())
+        except ValueError as exc:
+            QMessageBox.warning(self,'Invalid Source Color Assignment',str(exc))
+            return
+        self.preferences.disabled=proposed.disabled
+        self.preferences.solid_assignments=proposed.solid_assignments
+        self.preferences._dirty=proposed._dirty
+        self._sync_assignment_widgets()
+        self._populate_solid_colors()
+        self.protections_changed.emit(dict(self.preferences.solid_assignments))
+        self.planning_changed.emit(True)
+
+    def remove_source_assignments(self, colors):
+        changed=False
+        for color in colors:
+            normalized=str(color).upper()
+            if normalized in self.preferences.solid_assignments:
+                self.preferences.unprotect(normalized)
+                changed=True
+        if changed:
+            self._sync_assignment_widgets()
+            self._populate_solid_colors()
+            self.protections_changed.emit(dict(self.preferences.solid_assignments))
+            self.planning_changed.emit(True)
+
+    def _sync_assignment_widgets(self):
+        """Display automatic requirements without persisting manual pins."""
+        locked=set(self.preferences.solid_assignments.values())
+        prior=self._changing
+        self._changing=True
+        try:
+            for index,(option,used,required) in enumerate(self._rows):
+                key=option['key']
+                auto=key in locked
+                used.setChecked(auto or self.preferences.selected(key))
+                required.setChecked(auto or self.preferences.is_pinned(key))
+                used.setEnabled(not auto)
+                required.setEnabled(not auto)
+                label=self.filaments.item(index,2)
+                if label is not None:
+                    name=str(option.get('name') or key)
+                    assigned=[hex_color for hex_color,filament in
+                              self.preferences.solid_assignments.items() if filament==key]
+                    label.setText(('🔒 ' if assigned else '') + name)
+                    label.setToolTip(name + ('\nAssigned source colors: '+', '.join(sorted(assigned))
+                                             if assigned else ''))
+        finally:
+            self._changing=prior
+        self._sync_status()
+        self._refresh_targets()
         self._update_actions()
 
     def _protect(self):

@@ -91,11 +91,12 @@ class FilamentPreferencesTests(unittest.TestCase):
         self.prefs.use_model('different.3mf')
         self.assertEqual(self.prefs.solid_assignments,{})
 
-    def test_disabled_filament_removed_from_protected_mappings(self):
+    def test_assigned_filament_cannot_be_silently_excluded(self):
         self.prefs.use_model('one.3mf')
         self.prefs.protect('#9199a4','black',{'#9199A4':1},OPTIONS)
-        self.prefs.apply(OPTIONS,{'cyan','magenta'},set())
-        self.assertFalse(self.prefs.solid_assignments)
+        with self.assertRaisesRegex(ValueError, 'assigned filament cannot be excluded'):
+            self.prefs.apply(OPTIONS,{'cyan','magenta'},set())
+        self.assertEqual(self.prefs.solid_assignments, {'#9199A4':'black'})
 
     def test_save_does_not_write_model_or_solid_data(self):
         self.prefs.use_model('C:/models/sample.3mf')
