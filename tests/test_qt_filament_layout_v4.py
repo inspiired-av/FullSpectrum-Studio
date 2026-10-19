@@ -55,7 +55,7 @@ class QtGeometryTests(unittest.TestCase):
         from PySide6.QtCore import QPoint
         self.assertGreater(self.tab.content_scroll.verticalScrollBar().maximum(), 0)
         table_end = self.tab.filaments.mapTo(self.tab.content, QPoint(0, self.tab.filaments.height())).y()
-        bulk_start = self.tab.enable_all.mapTo(self.tab.content, QPoint(0, 0)).y()
+        bulk_start = self.tab.bulk_use_button.mapTo(self.tab.content, QPoint(0, 0)).y()
         self.assertGreaterEqual(bulk_start, table_end)
         solid_end = self.tab.solid_table.mapTo(self.tab.content, QPoint(0, self.tab.solid_table.height())).y()
         assign_start = self.tab.target.mapTo(self.tab.content, QPoint(0, 0)).y()

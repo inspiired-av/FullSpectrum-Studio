@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QSignalBlocker, QItemSelectionModel, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QSignalBlocker, QItemSelectionModel, QItemSelection, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel, QLayout,
@@ -69,6 +69,33 @@ class ToggleSourceTable(QTableWidget):
             row = self.rowAt(int(event.position().y()))
             selected = self.selectionModel().selectedRows()
             if row >= 0 and len(selected) == 1 and selected[0].row() == row:
+                self.clearSelection()
+                self.setCurrentCell(-1, -1)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
+class FilamentSelectionTable(QTableWidget):
+    """Select visible rows by Ctrl+A; click the sole selected row to clear."""
+
+    select_visible_requested = Signal()
+
+    def keyPressEvent(self, event):
+        if (event.key() == Qt.Key.Key_A and
+                event.modifiers() == Qt.KeyboardModifier.ControlModifier):
+            self.select_visible_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        if (event.button() == Qt.MouseButton.LeftButton and
+                event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            index = self.indexAt(event.position().toPoint())
+            model = self.selectionModel()
+            selected = model.selectedRows() if model is not None else ()
+            if index.isValid() and len(selected) == 1 and selected[0].row() == index.row():
                 self.clearSelection()
                 self.setCurrentCell(-1, -1)
                 event.accept()
@@ -164,31 +191,35 @@ class FilamentsTab(QWidget):
         self.load_progress.setTextVisible(True)
         self.load_progress.setVisible(False)
         lay.addWidget(self.load_progress)
-        self.filaments = QTableWidget(0, 4)
+        self.filaments = FilamentSelectionTable(0, 4)
         self.filaments.setObjectName('filamentTable')
-        self.filaments.setHorizontalHeaderLabels(['Use', 'Color', 'Filament', 'Pin'])
+        self.filaments.setHorizontalHeaderLabels(['Use', 'Color', 'Filament', 'Require'])
         self.filaments.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.filaments.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.filaments.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.filaments.verticalHeader().setVisible(False)
         self.filaments.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.filaments.setColumnWidth(0, 46)
         self.filaments.setColumnWidth(1, 54)
-        self.filaments.setColumnWidth(3, 47)
+        self.filaments.setColumnWidth(3, 76)
         # The page scrolls in short windows. In tall windows, tables receive
         # spare vertical space instead of leaving a dead region below them.
         self.filaments.setMinimumHeight(230)
         self.filaments.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         lay.addWidget(self.filaments, 3)
-        bulk = QHBoxLayout()
-        self.enable_all = QPushButton('Enable All')
-        self.enable_all.clicked.connect(self._enable_all)
-        bulk.addWidget(self.enable_all)
-        self.clear_pins = QPushButton('Clear Pins')
-        self.clear_pins.clicked.connect(self._clear_pins)
-        bulk.addWidget(self.clear_pins)
-        bulk.addStretch()
-        lay.addLayout(bulk)
-        self.selection_hint = _text('Pinned filaments occupy physical slots; other enabled colors remain candidates.', 'helpText')
+        # Ctrl+A selects visible rows; clicking the sole selected row clears it.
+        bulk_actions = QHBoxLayout()
+        bulk_actions.setSpacing(7)
+        self.bulk_use_button = QPushButton('Use Selected')
+        self.bulk_use_button.setToolTip('If all selected are in Use, exclude all; otherwise enable all')
+        self.bulk_use_button.clicked.connect(self._bulk_toggle_use)
+        bulk_actions.addWidget(self.bulk_use_button, 1)
+        self.bulk_require_button = QPushButton('Require Selected')
+        self.bulk_require_button.setToolTip('If all selected are required, make all optional; otherwise require all')
+        self.bulk_require_button.clicked.connect(self._bulk_toggle_required)
+        bulk_actions.addWidget(self.bulk_require_button, 1)
+        lay.addLayout(bulk_actions)
+        self.selection_hint = _text('Require guarantees a physical slot. Other checked filaments remain optional candidates. Ctrl/Shift-click rows for bulk actions.', 'helpText')
         lay.addWidget(self.selection_hint)
         actions = QHBoxLayout()
         self.save_button = QPushButton('Save Filaments')
@@ -242,6 +273,8 @@ class FilamentsTab(QWidget):
         lay.addWidget(_text('Model highlighting will be connected in Stage 3. '
                             'Protected colors will be passed to the engine in Stage 4.', 'helpText'))
         self._update_actions()
+        self.filaments.itemSelectionChanged.connect(self._update_actions)
+        self.filaments.select_visible_requested.connect(self._select_filtered_filaments)
 
     def _source_settings(self):
         return (self.plan_preferences.get('source'), self.plan_preferences.get('custom'))
@@ -371,7 +404,7 @@ class FilamentsTab(QWidget):
                 name.setToolTip(details + '\n' + str(key))
                 self.filaments.setItem(i,2,name)
                 pin = QCheckBox()
-                pin.setToolTip('Pin to a physical filament slot')
+                pin.setToolTip('Require this filament in the physical palette (mixing remains allowed)')
                 pin.setChecked(self.preferences.is_pinned(key))
                 cell2 = QWidget(); ph=QHBoxLayout(cell2)
                 ph.setContentsMargins(7,0,0,0); ph.addWidget(pin)
@@ -461,7 +494,7 @@ class FilamentsTab(QWidget):
             active,pinned = self._read_rows() if table_pending else (
                 {o['key'] for o in self.options if self.preferences.selected(o['key'])},
                 {o['key'] for o in self.options if self.preferences.is_pinned(o['key'])})
-            self.summary.setText(f'{len(active)} of {len(self.options)} enabled · {len(pinned)} pinned'
+            self.summary.setText(f'{len(active)} of {len(self.options)} usable · {len(pinned)} required'
                                  + (' · Unsaved changes' if table_pending or self.preferences.is_dirty else ''))
         self._update_actions()
 
@@ -479,6 +512,106 @@ class FilamentsTab(QWidget):
         self._changing=False
         self._table_changed()
 
+    def _selected_filament_rows(self):
+        """Only currently visible, fully populated rows are eligible for edits."""
+        if self._population_active or not self._rows:
+            return ()
+        model = self.filaments.selectionModel()
+        if model is None:
+            return ()
+        return tuple(sorted(idx.row() for idx in model.selectedRows()
+                            if 0 <= idx.row() < len(self._rows)
+                            and not self.filaments.isRowHidden(idx.row())))
+
+    def _select_filtered_filaments(self):
+        """Select the visible rows in one Qt selection operation."""
+        if self._population_active or not self._rows:
+            return
+        visible = [i for i in range(len(self._rows)) if not self.filaments.isRowHidden(i)]
+        if not visible:
+            self.filaments.clearSelection()
+            return
+        selection = QItemSelection()
+        model = self.filaments.model()
+        first = prev = visible[0]
+        for i in visible[1:]:
+            if i != prev + 1:
+                selection.select(model.index(first, 0), model.index(prev, self.filaments.columnCount() - 1))
+                first = i
+            prev = i
+        selection.select(model.index(first, 0), model.index(prev, self.filaments.columnCount() - 1))
+        self.filaments.selectionModel().select(
+            selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        self._update_actions()
+
+    def _bulk_toggle_use(self):
+        """Toggle Use uniformly across selected rows, never individually."""
+        rows = self._selected_filament_rows()
+        if not rows:
+            return
+        all_usable = all(self._rows[row][1].isChecked() for row in rows)
+        self._bulk_change('exclude' if all_usable else 'use')
+
+    def _bulk_toggle_required(self):
+        """Toggle Require uniformly; requiring also enables Use."""
+        rows = self._selected_filament_rows()
+        if not rows:
+            return
+        all_required = all(self._rows[row][2].isChecked() for row in rows)
+        self._bulk_change('optional' if all_required else 'require')
+
+    def _bulk_change(self, action):
+        """Atomically stage a batch, then emit exactly one planning event.
+
+        A shadow preference object runs the existing source-specific validation
+        before any checkbox or live preference can be changed. No half-applied
+        selection if required count, unique colors or preference limits fail.
+        """
+        rows = self._selected_filament_rows()
+        self._bulk_change_rows(rows, action)
+
+    def _bulk_change_rows(self, rows, action):
+        """Validate and apply the selected filament rows as a single batch."""
+        if not rows or action not in ('use', 'exclude', 'require', 'optional'):
+            return
+        before = [(enabled.isChecked(), required.isChecked())
+                  for _opt, enabled, required in self._rows]
+        after = list(before)
+        for row in rows:
+            enabled, required = after[row]
+            if action == 'use':
+                after[row] = (True, required)
+            elif action == 'exclude':
+                after[row] = (False, False)
+            elif action == 'require':
+                after[row] = (True, True)
+            else:
+                after[row] = (enabled, False)
+        if before == after:
+            return  # A no-op must not invalidate an expensive forecast.
+        usable = {opt['key'] for (opt, _e, _r), (e, r) in zip(self._rows, after) if e}
+        required = {opt['key'] for (opt, _e, _r), (e, r) in zip(self._rows, after) if r}
+        from copy import copy
+        preview = copy(self.preferences)
+        preview.disabled = set(self.preferences.disabled)
+        preview.pinned = set(self.preferences.pinned)
+        preview.solid_assignments = dict(self.preferences.solid_assignments)
+        try:
+            preview.apply(self.options, usable, required, self._max_pins())
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid Bulk Filament Selection', str(exc))
+            return
+        previous_changing = self._changing
+        self._changing = True
+        try:
+            for row in rows:
+                _opt, enable_widget, require_widget = self._rows[row]
+                enable_widget.setChecked(after[row][0])
+                require_widget.setChecked(after[row][1])
+        finally:
+            self._changing = previous_changing
+        self._table_changed()  # One snapshot, one planning_changed emission.
+
     def _filter(self):
         # Filtering while Qt has not finished creating row items is unsafe and
         # can make a partially populated table appear empty. The search text
@@ -488,9 +621,14 @@ class FilamentsTab(QWidget):
                                  f'{len(self.options):,}; search will apply when ready')
             return
         query=self.search.text().casefold().strip()
+        # Never let selections from an old filter silently affect new results.
+        if getattr(self, '_last_filter_query', None) != query:
+            self.filaments.clearSelection()
+            self._last_filter_query = query
         for i,opt in enumerate(self.options[:self.filaments.rowCount()]):
             text=' '.join(str(opt.get(k,'') or '') for k in ('name','series','color','key')).casefold()
             self.filaments.setRowHidden(i, bool(query and query not in text))
+        self._update_actions()  # Recompute selected-row bulk button states.
 
     def save(self):
         if not self._accept_table(True):
@@ -513,7 +651,7 @@ class FilamentsTab(QWidget):
         self._sync_status()
         if hasattr(self.window(), '_update_plan_dirty_state'):
             self.window()._update_plan_dirty_state()
-        self.activity_event.emit('success', 'Filaments', 'Filament selections and pins saved.')
+        self.activity_event.emit('success', 'Filaments', 'Filament selections and requirements saved.')
         self._update_actions()
 
     def revert(self):
@@ -796,8 +934,18 @@ class FilamentsTab(QWidget):
 
     def _update_actions(self):
         has_options=bool(self._rows) and not self._population_active
-        self.enable_all.setEnabled(has_options)
-        self.clear_pins.setEnabled(has_options)
+        selected_rows = self._selected_filament_rows() if has_options else ()
+        self.selection_hint.setText(
+            f'{len(selected_rows)} selected · Ctrl/Shift-click to select · '
+            'Ctrl+A selects visible rows · Click the selected row again to clear.')
+        self.bulk_use_button.setEnabled(bool(selected_rows))
+        self.bulk_require_button.setEnabled(bool(selected_rows))
+        all_usable = bool(selected_rows) and all(
+            self._rows[row][1].isChecked() for row in selected_rows)
+        all_required = bool(selected_rows) and all(
+            self._rows[row][2].isChecked() for row in selected_rows)
+        self.bulk_use_button.setText('Exclude Selected' if all_usable else 'Use Selected')
+        self.bulk_require_button.setText('Unrequire Selected' if all_required else 'Require Selected')
         self.save_button.setEnabled(has_options)
         self.revert_button.setEnabled(has_options)
         selected = self._selected_colors()

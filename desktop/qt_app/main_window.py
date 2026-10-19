@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         QTimer.singleShot(0, self._initialize_filament_setup)
         self.statusBar().showMessage(
-            "Qt Stage 4D-C — export uses the existing conversion and validation pipeline."
+            "Qt Stage 4D-D1 — filament selection and bulk controls."
         )
 
     def _build(self):
@@ -149,7 +149,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 4D-C", "badge"))
+        h.addWidget(_label("UI prototype · Stage 4D-D1", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -647,7 +647,7 @@ class MainWindow(QMainWindow):
                                "helpText", wrap=True))
         shortcut = QPushButton('Manage Filament Colors…')
         shortcut.setObjectName('manageFilamentsButton')
-        shortcut.setToolTip('Choose your filament source, library and pinned colors under Filaments.')
+        shortcut.setToolTip('Choose usable and required filament colors under Filaments.')
         shortcut.clicked.connect(lambda: self.tabs.setCurrentWidget(self.filaments_panel))
         col.addWidget(shortcut)
         col.addWidget(_label('Filament source and material selection are managed on the Filaments tab.',

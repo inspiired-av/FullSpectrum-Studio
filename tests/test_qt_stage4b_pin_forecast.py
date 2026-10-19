@@ -149,6 +149,6 @@ class QtPinIntegrationTests(unittest.TestCase):
         self.panel._rows[2][2].setChecked(True)
         self.assertFalse(self.panel.selection_is_valid)
         self.assertEqual(self.panel.preferences.pinned,stored)
-        self.assertIn('pinned',self.panel.selection_error.lower())
+        self.assertIn('require at most 2', self.panel.selection_error.lower())
 
 if __name__ == "__main__": unittest.main()

@@ -57,7 +57,7 @@ Use **Optimization Details** for the chosen physical filaments and mixer proport
         'Balance color fidelity, recipe count and maximum palette size.',
         """**Maximum fidelity** favors accurate matches; **Balanced** limits unnecessary mixtures; **Fill palette** attempts to use more available slots.
 
-**Maximum palette size** counts both physical and mixed slots (up to 32). Too few slots for required physical filaments is invalid. Use **Manage Filament Colors…** to enable candidates or pin physical colors. Pinning can change the entire result, so refresh after changes when automatic forecast is off."""),
+**Maximum palette size** counts both physical and mixed slots (up to 32). Too few slots for required physical filaments is invalid. Use **Manage Filament Colors…** to enable candidates or require physical filaments. Requirements can change the entire result, so refresh after changes when automatic forecast is off."""),
     'native_project_template': HelpTopic(
         'Native Project Template',
         'Use an empty slicer 3MF containing your printer and process presets.',
@@ -85,15 +85,15 @@ This supplies slicer profiles; it is not the source model. Confirm the detected 
 2. Copy the [custom-palette.example.json example]({example}) and save a local **.json** file.
 3. Add one entry per physical filament inside the `filaments` array, using `name`, `brand`, `series` and a six-digit `color` (such as `#F4F1EA`). Include at least two distinct colors for planning.
 4. Choose **Custom filament library**, select your JSON with **Browse…**, then click **Load / Refresh**.
-5. Enable or pin candidates as needed and click **Save Filaments** to persist your choices.
+5. Use or require candidates as needed and click **Save Filaments** to persist your choices.
 
 Loading the file does not upload it to a server. Changes to its contents require refreshing the library.""".format(readme=README_CUSTOM, example=LIBRARY_EXAMPLE)),
     'filament_colors': HelpTopic(
         'Filament Colors',
-        'Enable candidates; pin the physical filaments that must be used.',
-        """**Use** makes a color available to the optimizer. **Pin** requires that physical color in the plan. Pinning also enables the color; disabling removes its pin. The pin limit follows **Physical slots**.
+        'Choose usable filaments and require the ones that must be selected.',
+        """**Use** makes a filament available to the optimizer. **Require** guarantees a physical slot while allowing the filament in mixtures. Requiring also checks Use; unchecking Use clears Require. The number of required filaments cannot exceed **Physical slots**.
 
-Search by name, series or HEX. Search filters the table only; it does not change selections. Valid edits affect the current forecast immediately, but **Save Filaments** is still required to save those choices to disk. **Revert** restores saved settings."""),
+Search by name, series or HEX. Ctrl/Shift-click rows, or use **Select Filtered** to select all visible rows. **Ctrl+A** in the filament table selects all visible rows for bulk actions; Ctrl/Shift-click adjusts the selection, and clicking the only selected row again clears it. The two bulk buttons switch between **Use Selected / Exclude Selected** and **Require Selected / Unrequire Selected**. Mixed selections are made consistent, not inverted individually. At least two distinct colors must remain enabled; invalid bulk actions never partially apply. Save Filaments persists your choices. **Save Filaments** persists choices; **Revert** restores saved settings. **Revert** restores saved settings."""),
     'protect_solid_colors': HelpTopic(
         'Protect Solid Colors',
         'Assign exact source colors to specific physical filaments.',

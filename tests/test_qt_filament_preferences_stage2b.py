@@ -46,7 +46,7 @@ class FilamentPreferencesTests(unittest.TestCase):
             self.prefs.apply(duplicate,{'cyan','magenta'},set())
 
     def test_pin_only_enabled_and_limit(self):
-        with self.assertRaisesRegex(ValueError,'also be enabled'):
+        with self.assertRaisesRegex(ValueError, r'Required filaments must also have Use checked'):
             self.prefs.apply(OPTIONS,{'cyan','black'},{'magenta'})
         with self.assertRaisesRegex(ValueError,'at most 1'):
             self.prefs.apply(OPTIONS,{'cyan','black'},{'cyan','black'},max_slots=1)
