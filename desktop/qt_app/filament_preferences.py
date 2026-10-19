@@ -44,11 +44,15 @@ class FilamentPreferences:
         distinct = {str(item.get('color', '')).upper() for item in options
                     if item['key'] in enabled and _HEX.fullmatch(str(item.get('color', '')))}
         if len(distinct) < 2:
-            raise ValueError('Enable at least two distinct filament colors.')
+            raise ValueError('Use at least two distinct filament colors.')
         if not pinned <= enabled:
-            raise ValueError('Pinned colors must also be enabled.')
+            raise ValueError('Required filaments must also have Use checked.')
         if len(pinned) > int(max_slots):
-            raise ValueError(f'This plan allows at most {max_slots} pinned physical colors.')
+            count = int(max_slots)
+            noun = 'filament' if count == 1 else 'filaments'
+            raise ValueError(
+                f'You can require at most {count} {noun} with the current Physical slots setting.'
+            )
         new_disabled = (self.disabled - keys) | (keys - enabled)
         new_pinned = (self.pinned - keys) | pinned
         if len(new_disabled) > 1000 or len(new_pinned) > 1000:
