@@ -1,10 +1,9 @@
-"""FullSpectrum Studio Qt Stage 4C: read-only 3D palette visualization and forecasts.
-
-Conversion/export remain in the existing frontend until Stage 4D.
-"""
+"""FullSpectrum Studio Qt Stage 4D-C: native 3MF export using the existing engine."""
 from __future__ import annotations
 
 import time
+import os
+import subprocess
 
 from pathlib import Path
 
@@ -27,6 +26,9 @@ from desktop.qt_app.filaments_tab import FilamentsTab
 from desktop.qt_app.gl_viewport import ModelViewport
 from desktop.qt_app.preview_worker import ModelLoadWorker
 from desktop.qt_app.forecast_worker import ForecastWorker
+from desktop.qt_app.export_worker import ExportWorker
+from desktop.qt_app.export_service import make_export_request
+from desktop.slicer_launcher import find_windows_slicer
 from desktop.qt_app.forecast_service import make_request
 from desktop.qt_app.forecast_view_state import ForecastViewState
 from desktop.qt_app.planning_details_panel import PlanningDetailsPanel
@@ -90,6 +92,10 @@ class MainWindow(QMainWindow):
         self._forecast_pending = False
         self._forecast_task = None
         self._pending_review_filament_key = None
+        self._export_task = None
+        self._export_request = None
+        self._export_result = None
+        self._export_serial = 0
         self._inspection_serial = 0
         self._inspection_threads = []
         self._forecast_timer = QTimer(self)
@@ -111,14 +117,14 @@ class MainWindow(QMainWindow):
         self._filament_load_error = ''
         self._saved_filament_source = self.plan_preferences.saved.get('source')
         self.setObjectName("qtMainWindow")
-        self.setWindowTitle("FullSpectrum Studio — Qt UI Preview")
+        self.setWindowTitle("FullSpectrum Studio — Qt")
         self.resize(1440, 880)
         self.setMinimumSize(920, 630)
         self._build()
         self._build_menus()
         QTimer.singleShot(0, self._initialize_filament_setup)
         self.statusBar().showMessage(
-            "Qt Stage 4D-A — dominant physical anchors and interactive recipe contributions; native 3MF export is not active."
+            "Qt Stage 4D-C — export uses the existing conversion and validation pipeline."
         )
 
     def _build(self):
@@ -143,7 +149,7 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 4D-A", "badge"))
+        h.addWidget(_label("UI prototype · Stage 4D-C", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -168,7 +174,7 @@ class MainWindow(QMainWindow):
         bottom.setObjectName("bottomBar")
         foot = QHBoxLayout(bottom)
         foot.setContentsMargins(8, 9, 8, 9)
-        self.bottom_hint = _label("Plan and filament settings are saved normally. Results shows session activity and previously saved reports; Qt conversion is not active.", "helpText")
+        self.bottom_hint = _label("Forecast is read-only. Export Native 3MF runs the existing conversion and validation pipeline.", "helpText")
         self.bottom_hint.setWordWrap(True)
         foot.addWidget(self.bottom_hint)
         main.addWidget(bottom)
@@ -317,6 +323,9 @@ class MainWindow(QMainWindow):
         self.custom_library_path = self.filaments_panel.custom_library_path
         self.custom_library_browse = self.filaments_panel.custom_library_browse
         self.custom_library_browse.clicked.connect(self._browse_custom_library)
+        # Export widgets must exist before _plan_tab restores and wires preferences.
+        self.export_settings_panel = self._build_export_settings()
+        self.export_action_panel = self._build_export_actions()
         self.tabs.addTab(self._plan_tab(), "Plan")
         self.tabs.addTab(self.filaments_panel, "Filaments")
         self.tabs.currentChanged.connect(self._tab_changed)
@@ -325,7 +334,13 @@ class MainWindow(QMainWindow):
         self.filament_source.currentIndexChanged.connect(
             lambda _: self.filaments_panel.load_options())
         self.results_panel = ResultsTab(self.tabs)
-        self.tabs.addTab(self.results_panel, "Results")
+        self.results_panel.open_export_requested.connect(self._open_export_in_slicer)
+        self.results_panel.show_export_folder_requested.connect(self._show_export_folder)
+        self.results_panel.attach_export_panels(self.export_settings_panel, self.export_action_panel)
+        # Single source of truth for validated output actions, on the Export tab.
+        self.open_export_button = self.results_panel.open_export_button
+        self.export_folder_button = self.results_panel.export_folder_button
+        self.tabs.addTab(self.results_panel, "Export")
         self.filaments_panel.activity_event.connect(self._filament_activity)
         self.filaments_panel.planning_changed.connect(self._filament_planning_changed)
         self.filaments_panel.source_color_selected.connect(self._filament_color_selected)
@@ -338,6 +353,7 @@ class MainWindow(QMainWindow):
             filament_layout.indexOf(self.filaments_panel.selection_hint) + 1,
             self.confirm_filaments_tab_button)
         self.confirm_filaments_tab_button.setVisible(False)
+        self._refresh_export_directory()
         self._refresh_results_context()
         outer.addWidget(self.tabs)
         return sidebar
@@ -361,6 +377,141 @@ class MainWindow(QMainWindow):
         index = combo.findData(value)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def _build_export_settings(self):
+        """Export-only choices, backed by the existing PlanPreferences model."""
+        panel = QWidget()
+        panel.setObjectName('exportSettingsPanel')
+        col = _column(panel, margins=(0, 0, 0, 0), spacing=8)
+        col.addWidget(help_heading("native_project_template", "NATIVE PROJECT TEMPLATE"))
+        template_row = QHBoxLayout()
+        self.template_path = QLineEdit()
+        self.template_path.setObjectName("nativeTemplatePath")
+        self.template_path.setReadOnly(True)
+        self.template_path.setPlaceholderText("Select a blank slicer-saved 3MF project")
+        template_row.addWidget(self.template_path, 1)
+        self.template_browse = QPushButton("Browse…")
+        self.template_browse.clicked.connect(self._browse_template)
+        template_row.addWidget(self.template_browse)
+        col.addLayout(template_row)
+        template_actions = QHBoxLayout()
+        self.template_clear = QPushButton("Clear")
+        self.template_clear.clicked.connect(self._clear_template)
+        template_actions.addWidget(self.template_clear)
+        template_actions.addStretch()
+        col.addLayout(template_actions)
+        self.template_status = _label("No native project template selected.", "templateStatus", wrap=True)
+        col.addWidget(self.template_status)
+        self.template_compatibility = _label("", "templateWarning", wrap=True)
+        col.addWidget(self.template_compatibility)
+        slicer_panel = self._section()
+        form = QFormLayout(slicer_panel)
+        form.setContentsMargins(10, 10, 10, 10)
+        form.setSpacing(9)
+        self.auto_open = QCheckBox("Open validated output automatically")
+        self.auto_open.setToolTip("Open the validated 3MF in your chosen slicer after a successful export.")
+        form.addRow(self.auto_open)
+        self.output_application = self._choice(OUTPUT_SLICERS)
+        form.addRow("Output slicer", self.output_application)
+        # Portable/nightly slicer executable choice mirrors the existing Tkinter
+        # settings, and now launches a slicer only after validated export.
+        self.slicer_executable_row = QWidget()
+        slicer_controls = QHBoxLayout(self.slicer_executable_row)
+        slicer_controls.setContentsMargins(0, 0, 0, 0)
+        slicer_controls.setSpacing(6)
+        self.slicer_executable_browse = QPushButton("Choose EXE…")
+        self.slicer_executable_browse.setObjectName("slicerExecutableBrowse")
+        self.slicer_executable_browse.clicked.connect(self._browse_slicer_executable)
+        slicer_controls.addWidget(self.slicer_executable_browse)
+        self.slicer_executable_auto = QPushButton("Auto")
+        self.slicer_executable_auto.setObjectName("slicerExecutableAuto")
+        self.slicer_executable_auto.clicked.connect(self._clear_slicer_executable)
+        slicer_controls.addWidget(self.slicer_executable_auto)
+        form.addRow("Slicer executable", self.slicer_executable_row)
+        self.slicer_executable_status = _label("Automatic executable detection", "helpText", wrap=True)
+        self.slicer_executable_status.setObjectName("slicerExecutableStatus")
+        form.addRow("", self.slicer_executable_status)
+        col.addWidget(slicer_panel)
+        col.addWidget(_label('OUTPUT DIRECTORY', 'sectionTitle'))
+        directory_row = QHBoxLayout()
+        self.export_directory = QLineEdit()
+        self.export_directory.setObjectName('exportOutputDirectory')
+        self.export_directory.setReadOnly(True)
+        self.export_directory.setPlaceholderText('Model folder (default)')
+        self.export_directory.setToolTip('Defaults to the source model folder. Browse to choose another folder for this session.')
+        directory_row.addWidget(self.export_directory, 1)
+        self.export_directory_browse = QPushButton('Browse…')
+        self.export_directory_browse.setObjectName('exportDirectoryBrowse')
+        self.export_directory_browse.clicked.connect(self._choose_export_directory)
+        directory_row.addWidget(self.export_directory_browse)
+        col.addLayout(directory_row)
+        col.addWidget(_label('Validated output and reports are saved together; existing files are not overwritten.',
+                              'helpText', wrap=True))
+        preferences_row = QHBoxLayout()
+        self.export_save_settings_button = QPushButton('Save Settings')
+        self.export_save_settings_button.setObjectName('exportSaveSettings')
+        self.export_save_settings_button.clicked.connect(self._save_plan_settings)
+        preferences_row.addWidget(self.export_save_settings_button)
+        self.export_revert_settings_button = QPushButton('Revert')
+        self.export_revert_settings_button.setObjectName('exportRevertSettings')
+        self.export_revert_settings_button.clicked.connect(self._revert_plan_settings)
+        preferences_row.addWidget(self.export_revert_settings_button)
+        col.addLayout(preferences_row)
+        return panel
+
+    def _build_export_actions(self):
+        """Only the export button, live progress, and cancellation belong here."""
+        panel = QWidget()
+        panel.setObjectName('exportActionsPanel')
+        col = _column(panel, margins=(0, 0, 0, 0), spacing=8)
+        self.compose_button = QPushButton("Export Native 3MF…")
+        self.compose_button.setObjectName("primary")
+        self.compose_button.setAccessibleName('export3mfButton')
+        self.compose_button.setEnabled(False)
+        self.compose_button.setToolTip('Generate and validate a native 3MF, recipe CSV and reports with the existing FullSpectrum engine.')
+        self.compose_button.clicked.connect(self._begin_export)
+        col.addWidget(self.compose_button)
+        self.export_progress = QProgressBar()
+        self.export_progress.setObjectName('exportProgress')
+        self.export_progress.setRange(0, 100)
+        self.export_progress.setVisible(False)
+        col.addWidget(self.export_progress)
+        self.export_status = _label('Choose a model and configure filaments to enable export.', 'helpText', wrap=True)
+        self.export_status.setObjectName('exportStatus')
+        col.addWidget(self.export_status)
+        export_actions = QHBoxLayout()
+        self.export_cancel_button = QPushButton('Cancel Export')
+        self.export_cancel_button.setObjectName('cancelExportButton')
+        self.export_cancel_button.setEnabled(False)
+        self.export_cancel_button.clicked.connect(self._cancel_export)
+        export_actions.addWidget(self.export_cancel_button)
+        col.addLayout(export_actions)
+        col.addWidget(_label('Export runs separately from the read-only Live Forecast. Printer settings and slicing must still be reviewed in your slicer.',
+                              'helpText', wrap=True))
+        return panel
+
+    def _show_export_tab(self):
+        self.tabs.setCurrentWidget(self.results_panel)
+
+    def _refresh_export_directory(self):
+        if getattr(self, '_export_directory_override', None):
+            folder = self._export_directory_override
+        elif self.state.model_path:
+            folder = str(Path(self.state.model_path).parent)
+        else:
+            folder = ''
+        self.export_directory.setText(folder)
+        self.export_directory.setToolTip(folder or 'Open a model to select the default output directory.')
+
+    def _choose_export_directory(self):
+        if self._export_task is not None:
+            return
+        initial = (self.export_directory.text().strip() or
+                   str(Path(self.state.model_path).parent) if self.state.model_path else str(Path.home()))
+        folder = QFileDialog.getExistingDirectory(self, 'Choose 3MF Output Folder', initial)
+        if folder:
+            self._export_directory_override = str(Path(folder).resolve())
+            self._refresh_export_directory()
 
     def _plan_tab(self):
         page = QWidget()
@@ -501,27 +652,6 @@ class MainWindow(QMainWindow):
         col.addWidget(shortcut)
         col.addWidget(_label('Filament source and material selection are managed on the Filaments tab.',
                              'helpText', wrap=True))
-        col.addWidget(help_heading("native_project_template", "NATIVE PROJECT TEMPLATE"))
-        template_row = QHBoxLayout()
-        self.template_path = QLineEdit()
-        self.template_path.setObjectName("nativeTemplatePath")
-        self.template_path.setReadOnly(True)
-        self.template_path.setPlaceholderText("Select a blank slicer-saved 3MF project")
-        template_row.addWidget(self.template_path, 1)
-        self.template_browse = QPushButton("Browse…")
-        self.template_browse.clicked.connect(self._browse_template)
-        template_row.addWidget(self.template_browse)
-        col.addLayout(template_row)
-        template_actions = QHBoxLayout()
-        self.template_clear = QPushButton("Clear")
-        self.template_clear.clicked.connect(self._clear_template)
-        template_actions.addWidget(self.template_clear)
-        template_actions.addStretch()
-        col.addLayout(template_actions)
-        self.template_status = _label("No native project template selected.", "templateStatus", wrap=True)
-        col.addWidget(self.template_status)
-        self.template_compatibility = _label("", "templateWarning", wrap=True)
-        col.addWidget(self.template_compatibility)
         self.advanced_toggle = QToolButton()
         self.advanced_toggle.setText("Advanced Settings ▸")
         self.advanced_toggle.setCheckable(True)
@@ -580,29 +710,6 @@ class MainWindow(QMainWindow):
         self.auto_forecast = QCheckBox("Automatic forecast")
         self.auto_forecast.setToolTip("Refreshes the forecast after model or planning changes; uses the existing optimizer.")
         form.addRow(self.auto_forecast)
-        self.auto_open = QCheckBox("Open validated output automatically (Stage 4)")
-        self.auto_open.setToolTip("Preference saved now; no conversion is performed.")
-        form.addRow(self.auto_open)
-        self.output_application = self._choice(OUTPUT_SLICERS)
-        form.addRow("Output slicer", self.output_application)
-        # Portable/nightly slicer executable choice mirrors the existing Tkinter
-        # settings, but never starts a slicer in this UI-only stage.
-        self.slicer_executable_row = QWidget()
-        slicer_controls = QHBoxLayout(self.slicer_executable_row)
-        slicer_controls.setContentsMargins(0, 0, 0, 0)
-        slicer_controls.setSpacing(6)
-        self.slicer_executable_browse = QPushButton("Choose EXE…")
-        self.slicer_executable_browse.setObjectName("slicerExecutableBrowse")
-        self.slicer_executable_browse.clicked.connect(self._browse_slicer_executable)
-        slicer_controls.addWidget(self.slicer_executable_browse)
-        self.slicer_executable_auto = QPushButton("Auto")
-        self.slicer_executable_auto.setObjectName("slicerExecutableAuto")
-        self.slicer_executable_auto.clicked.connect(self._clear_slicer_executable)
-        slicer_controls.addWidget(self.slicer_executable_auto)
-        form.addRow("Slicer executable", self.slicer_executable_row)
-        self.slicer_executable_status = _label("Automatic executable detection (Stage 4)", "helpText", wrap=True)
-        self.slicer_executable_status.setObjectName("slicerExecutableStatus")
-        form.addRow("", self.slicer_executable_status)
         col.addWidget(self.advanced_panel)
         self.advanced_panel.setVisible(False)
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
@@ -618,12 +725,13 @@ class MainWindow(QMainWindow):
         col.addLayout(actions)
         self.plan_save_status = _label("Settings loaded", "helpText", wrap=True)
         col.addWidget(self.plan_save_status)
-        self.compose_button = QPushButton("Compose Palette")
-        self.compose_button.setObjectName("primary")
-        _disabled(self.compose_button, "Conversion and export will be connected in Stage 4.")
-        col.addWidget(self.compose_button)
-        col.addWidget(_label("Planning runs as a read-only preview. 3MF conversion and export remain in Stage 4D.",
-                               "helpText", wrap=True))
+        self.review_export_button = QPushButton('Review && Export →')
+        self.review_export_button.setObjectName('reviewExportShortcut')
+        self.review_export_button.setToolTip('Open the Export tab to review native project settings and generate a validated 3MF.')
+        self.review_export_button.clicked.connect(self._show_export_tab)
+        col.addWidget(self.review_export_button)
+        col.addWidget(_label('Live Forecast is read-only; conversion settings and validation are on Export.',
+                              'helpText', wrap=True))
         self._restore_plan_widgets()
         self._wire_plan_widgets()
         return self._scroll(page)
@@ -732,6 +840,9 @@ class MainWindow(QMainWindow):
             self._filament_setup_confirmed = True  # Explicit user source choice.
         self._refresh_dependent_plan_widgets()
         self._update_plan_dirty_state()
+        # Saving the same value should never invalidate an existing forecast.
+        if not changed:
+            return
         # Automatic forecasting is a scheduling preference, not a planner input.
         # Turning it off must not erase (or invalidate) a successful result.
         if field == 'auto_preview':
@@ -750,8 +861,9 @@ class MainWindow(QMainWindow):
             if self._forecast_view.stale or not self._forecast_view.has_previous:
                 self._present_forecast_pending()
             return
-        # Slicer launch settings do not affect the read-only palette forecast.
-        if field in ('auto_open', 'output_application', 'bambu_studio_executable', 'orcaslicer_executable'):
+        # Export-only configuration does not affect the palette forecast.
+        if field in ('native_project_template', 'auto_open', 'output_application',
+                     'bambu_studio_executable', 'orcaslicer_executable'):
             return
         self._invalidate_forecast()
         if changed and field in ('source', 'custom'):
@@ -787,6 +899,9 @@ class MainWindow(QMainWindow):
         self.save_plan_button.setEnabled(dirty)
         self.revert_plan_button.setEnabled(dirty)
         self.plan_save_status.setText("Unsaved changes" if dirty else "Settings saved or unchanged")
+        if hasattr(self, 'export_save_settings_button'):
+            self.export_save_settings_button.setEnabled(dirty)
+            self.export_revert_settings_button.setEnabled(dirty)
         if hasattr(self, 'results_panel'):
             self._refresh_results_context()
 
@@ -835,6 +950,13 @@ class MainWindow(QMainWindow):
             self._repolish_template_status()
             from orca_profile_warning import orca_h2c_warning
             warning = orca_h2c_warning(details, self.output_application.currentData())
+            # Template ancestry and selected output application are independent.
+            # A warning is not proof that a newer slicer release is compatible.
+            selected_app = self.output_application.currentData()
+            if details.get('slicer') and selected_app and details['slicer'] != selected_app:
+                mismatch = (f"Template was saved by {details['slicer']}, but output opens in "
+                            f"{selected_app}. Use a matching native template if possible.")
+                warning = (warning + '\n' if warning else '') + mismatch
             if warning:
                 self.template_compatibility.setText(warning)
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
@@ -859,7 +981,7 @@ class MainWindow(QMainWindow):
         self.slicer_executable_auto.setEnabled(bool(path))
         if not path:
             self.slicer_executable_status.setText(
-                f"{selected}: automatic executable detection (launch integration in Stage 4).")
+                f"{selected}: automatic executable detection.")
         elif not Path(path).is_file():
             self.slicer_executable_status.setText(
                 f"{selected}: saved EXE not found: {path}. Choose a new executable or select Auto.")
@@ -897,17 +1019,50 @@ class MainWindow(QMainWindow):
         self._refresh_results_context()
 
     def _revert_plan_settings(self):
+        # Only optimizer-affecting preferences can invalidate the forecast.
+        # The exported template, slicer, executable and auto-open choices cannot.
+        planning_keys = (
+            'strategy', 'source', 'custom', 'real_slots', 'quality_bias',
+            'smart_quality', 'catalog_region', 'planner_mode', 'planning_sample',
+            'max_output_colors', 'output_color_strategy',
+        )
+        before = tuple(self.plan_preferences.get(key) for key in planning_keys)
+        source_before = (self.plan_preferences.get('source'),
+                         self.plan_preferences.get('custom'))
         self.plan_preferences.revert()
+        after = tuple(self.plan_preferences.get(key) for key in planning_keys)
+        source_after = (self.plan_preferences.get('source'),
+                        self.plan_preferences.get('custom'))
+        source_changed = source_before != source_after
         self._saved_filament_source = self.plan_preferences.saved.get('source')
-        self._filament_setup_confirmed = False
-        self._filament_options_ready = False
-        self._filament_load_error = ''
+        if source_changed:
+            self._filament_setup_confirmed = False
+            self._filament_options_ready = False
+            self._filament_load_error = ''
         self._restore_plan_widgets()
-        self.filaments_panel.load_options()
-        self.statusBar().showMessage("Plan edits discarded; settings reloaded from disk.")
-        self.results_panel.record_event('Plan settings', 'Unsaved Plan edits reverted.', 'info')
+        if source_changed:
+            self.filaments_panel.load_options()
+        self.statusBar().showMessage("Settings reloaded from disk.")
+        self.results_panel.record_event('Settings', 'Unsaved settings reverted.', 'info')
         self._refresh_results_context()
-        self._invalidate_forecast()
+        if before != after:
+            self._invalidate_forecast()
+        else:
+            self._refresh_filament_setup_ui()
+
+    def _refresh_export_availability(self):
+        if not hasattr(self, 'compose_button'):
+            return
+        busy = self._export_task is not None
+        ready = bool(self.state.model_path and Path(self.state.model_path).is_file())
+        # Do not run conversion with a partial or invalid filament source.
+        if ready and hasattr(self, 'filament_setup_banner'):
+            ready = self._filament_decision().ready and getattr(
+                self.filaments_panel, 'selection_is_valid', True)
+        self.compose_button.setEnabled(ready and not busy and self._forecast_task is None)
+        self.export_cancel_button.setEnabled(busy and self._export_task.isRunning())
+        self.open_export_button.setEnabled(not busy and bool(self._export_result))
+        self.export_folder_button.setEnabled(not busy and bool(self._export_result))
 
     def _refresh_results_context(self):
         if not hasattr(self, 'results_panel'):
@@ -918,6 +1073,9 @@ class MainWindow(QMainWindow):
             self.plan_preferences.get('output_application'),
             self.plan_preferences.is_dirty,
         )
+        if getattr(self, '_export_result', None):
+            output = Path(self._export_result['output'])
+            self.results_panel.set_export_result(self._export_result)
 
     def _filament_decision(self):
         return evaluate_setup(
@@ -965,6 +1123,7 @@ class MainWindow(QMainWindow):
             self.forecast_refresh.setEnabled(bool(self.state.model_path))
             if not self.state.model_path:
                 self._set_forecast_status('Filaments ready. Open a model to begin forecasting.')
+        self._refresh_export_availability()
         return decision
 
     def _confirm_filament_setup(self):
@@ -1069,7 +1228,7 @@ class MainWindow(QMainWindow):
         clear_color.triggered.connect(self._clear_palette_selection)
         self.addAction(clear_color)
         view = self.menuBar().addMenu("&View")
-        for idx, name in enumerate(("Plan", "Filaments", "Results")):
+        for idx, name in enumerate(("Plan", "Filaments", "Export")):
             nav = QAction(name, self)
             nav.setShortcut(QKeySequence(f"Ctrl+{idx+1}"))
             nav.triggered.connect(lambda checked=False, index=idx: self.tabs.setCurrentIndex(index))
@@ -1085,14 +1244,19 @@ class MainWindow(QMainWindow):
         # Let any 3MF/inventory reads finish so Qt never destroys a live QThread.
         self._forecast_timer.stop()
         self._forecast_heartbeat.stop()
+        if self._export_task is not None:
+            self._export_task.requestInterruption()
         if self._forecast_task is not None:
             self._forecast_task.requestInterruption()
-        for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + ([self._forecast_task] if self._forecast_task is not None else []):
+        for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + ([self._forecast_task] if self._forecast_task is not None else []) + ([self._export_task] if self._export_task is not None else []):
             if worker.isRunning():
                 worker.wait()
         super().closeEvent(event)
 
     def _open_model(self):
+        if self._export_task is not None:
+            QMessageBox.information(self, 'Export in progress', 'Wait for export to finish before changing models.')
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Open 3D Model", "", MODEL_FILE_FILTER)
         if not self.state.select_model(path):
             return
@@ -1103,11 +1267,16 @@ class MainWindow(QMainWindow):
         self.bottom_hint.setText(f"Selected: {name} — loading preview geometry (original files are unchanged).")
         self.statusBar().showMessage("Loading 3D model geometry…")
         self.results_panel.record_event('Model selected', f'{name} selected; loading preview geometry.', 'busy')
+        self._refresh_export_directory()
         self._refresh_results_context()
+        self._refresh_export_availability()
         self._load_preview(path)
         self._invalidate_forecast(clear_inspection=True)
 
     def _open_reference(self):
+        if self._export_task is not None:
+            QMessageBox.information(self, 'Export in progress', 'Wait for export to finish before changing references.')
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Open Visual Reference", "", REFERENCE_FILE_FILTER)
         if not self.state.select_reference(path):
             return
@@ -1178,7 +1347,7 @@ class MainWindow(QMainWindow):
         suffix = ' · sampled display only' if mesh.sampled else ''
         info = f"{len(mesh.triangles):,} visible triangles / {mesh.source_triangles:,} source triangles{suffix}"
         self.preview_status.setText(info + ' · Left drag orbit · Right drag pan · Wheel zoom · R reset')
-        self.bottom_hint.setText('Source geometry and colors loaded. Refresh Forecast for live predicted 3D views; export follows in Stage 4D.')
+        self.bottom_hint.setText('Source geometry loaded. Refresh Forecast for read-only analysis or open Export to generate a native 3MF.')
         self.statusBar().showMessage('3D preview ready: ' + info)
         self.results_panel.record_event('Model preview', info, 'success')
         self.source_inspection.setText(f'Source geometry: {mesh.source_triangles:,} triangles; inspecting project metadata…')
@@ -1385,6 +1554,7 @@ class MainWindow(QMainWindow):
         thread.progress_changed.connect(lambda fraction, message, s=serial: self._forecast_progress_changed(s, fraction, message))
         thread.completed.connect(lambda result, error, s=serial: self._forecast_done(s,result,error))
         thread.finished.connect(lambda t=thread: self._release_forecast(t))
+        self._refresh_export_availability()
         thread.start()
 
     def _cancel_forecast(self):
@@ -1480,6 +1650,7 @@ class MainWindow(QMainWindow):
         self.forecast_cancel.setEnabled(False)
         self.forecast_refresh.setEnabled(bool(self.state.model_path))
         thread.deleteLater()
+        self._refresh_export_availability()
         if self._forecast_pending:
             self._forecast_pending = False
             QTimer.singleShot(0, self._request_forecast)
@@ -1852,6 +2023,173 @@ class MainWindow(QMainWindow):
             self.preview_surface.set_influence_analysis(
                 self._influence_data, display=mode,
                 selected=self.anchor_legend.selected_slot)
+
+    # Stage 4D-C: leave Stage 4D-A preview/forecast code untouched.
+    def _begin_export(self):
+        if self._export_task is not None or self._forecast_task is not None:
+            QMessageBox.information(self, 'Export busy', 'Wait for the current background task to finish.')
+            return
+        decision = self._filament_decision()
+        if not decision.ready or not self.state.model_path or not Path(self.state.model_path).is_file():
+            QMessageBox.warning(self, 'Cannot Export', 'Open a model and configure valid filaments first.')
+            return
+        if not getattr(self.filaments_panel, 'selection_is_valid', True):
+            QMessageBox.warning(self, 'Cannot Export', self.filaments_panel.selection_error)
+            return
+        # Directory is explicitly displayed on Export; no surprise folder dialog.
+        directory = self.export_directory.text().strip() or str(Path(self.state.model_path).parent)
+        if not Path(directory).is_dir():
+            QMessageBox.warning(self, 'Output Folder Unavailable',
+                'Choose an existing output folder on the Export tab before exporting.')
+            return
+        request = make_export_request(
+            self.state.model_path, self.state.reference_path,
+            self.plan_preferences, self.filaments_panel.preferences, directory)
+        self._forecast_timer.stop()  # no concurrent palette planning
+        self.forecast_refresh.setEnabled(False)
+        self._export_serial += 1
+        serial = self._export_serial
+        self._export_request = request
+        self._completed_export_success = False
+        self.open_button.setEnabled(False)
+        self.reference_button.setEnabled(False)
+        self.export_directory_browse.setEnabled(False)
+        worker = ExportWorker(request, self)
+        self._export_task = worker
+        self.export_progress.setRange(0, 100)
+        self.export_progress.setValue(0)
+        self.export_progress.show()
+        self.export_status.setText('Preparing native 3MF export…')
+        self._refresh_export_availability()
+        self.results_panel.record_event('Native 3MF export',
+            f'Export requested for {Path(request.plan.model).name}', 'busy')
+        worker.progress_changed.connect(
+            lambda fraction, message, s=serial: self._export_progress_changed(s, fraction, message))
+        worker.completed.connect(
+            lambda result, error, s=serial: self._export_finished(s, result, error))
+        worker.finished.connect(lambda w=worker: self._release_export(w))
+        worker.start()
+        self.export_cancel_button.setEnabled(True)
+
+    def _export_progress_changed(self, serial, fraction, message):
+        if serial != self._export_serial:
+            return
+        self.export_progress.setValue(max(0, min(100, int(float(fraction) * 100))))
+        self.export_status.setText(str(message))
+        self.statusBar().showMessage('Export: ' + str(message))
+
+    def _cancel_export(self):
+        if self._export_task is None:
+            return
+        self._export_task.requestInterruption()
+        self.export_cancel_button.setEnabled(False)
+        self.export_status.setText('Cancelling at the next safe conversion checkpoint…')
+
+    def _export_finished(self, serial, result, error):
+        if serial != self._export_serial:
+            return
+        self.export_cancel_button.setEnabled(False)
+        if error is not None:
+            cancelled = isinstance(error, InterruptedError)
+            title = 'Export cancelled' if cancelled else 'Export failed'
+            self.export_status.setText(title + ': ' + str(error))
+            self.results_panel.record_event('Native 3MF export', str(error),
+                                            'warning' if cancelled else 'error')
+            if not cancelled:
+                QMessageBox.warning(self, title, str(error))
+            return
+        self._export_result = result
+        self._last_export_path = result['output']
+        self._completed_export_success = True
+        self.export_progress.setValue(100)
+        self.export_status.setText('Validated 3MF saved: ' + Path(result['output']).name)
+        self.results_panel.record_event('Native 3MF export',
+            'Validated: ' + Path(result['output']).name, 'success')
+        self._refresh_results_context()
+        report = result.get('report')
+        if report:
+            self.results_panel.load_report(report)
+        self.tabs.setCurrentWidget(self.results_panel)
+        self.statusBar().showMessage('Validated 3MF and reports saved successfully.')
+
+    def _release_export(self, worker):
+        should_open = (self._export_request is not None and self._export_request.auto_open
+                       and self._export_result is not None
+                       and self._completed_export_success)
+        if self._export_task is worker:
+            self._export_task = None
+        self._export_request = None
+        self._completed_export_success = False
+        self.open_button.setEnabled(True)
+        self.reference_button.setEnabled(True)
+        self.export_directory_browse.setEnabled(True)
+        self.forecast_refresh.setEnabled(bool(self.state.model_path) and self._filament_decision().ready)
+        self.export_progress.setVisible(False)
+        worker.deleteLater()
+        self._refresh_export_availability()
+        if should_open:
+            QTimer.singleShot(0, self._open_export_in_slicer)
+        # Any settings changed during export are staged but never silently
+        # applied to the in-flight frozen request.
+        if self.auto_forecast.isChecked() and self.state.model_path and (
+                self._forecast_view.stale or not self._forecast_view.has_previous):
+            self._forecast_timer.start()
+
+    def _open_export_in_slicer(self):
+        result = self._export_result
+        if not result or self._export_task is not None:
+            return
+        path = Path(result['output'])
+        if not path.is_file():
+            QMessageBox.warning(self, 'Output unavailable', 'The exported 3MF file was moved or deleted.')
+            return
+        app = result['slicer']
+        if app not in ('Bambu Studio', 'OrcaSlicer'):
+            return
+        try:
+            if os.name == 'nt':
+                configured = result.get('slicerExecutable') or ''
+                executable = Path(configured) if configured else find_windows_slicer(app)
+                if executable is None or not executable.is_file():
+                    selected, _ = QFileDialog.getOpenFileName(
+                        self, f'Locate {app} Executable', '', 'Windows executables (*.exe)')
+                    if not selected:
+                        self.results_panel.record_event('Slicer not opened',
+                            'Export is saved. Select a slicer executable to open it.', 'warning')
+                        return
+                    executable = Path(selected)
+                if not executable.is_file() or executable.suffix.lower() != '.exe':
+                    raise ValueError('Choose an existing slicer .exe file.')
+                subprocess.Popen([str(executable), str(path)], cwd=str(executable.parent))
+            elif os.name == 'posix':
+                # Match the legacy Mac frontend's explicit application selection.
+                import sys
+                if sys.platform != 'darwin':
+                    raise RuntimeError('Automatic slicer launch is currently supported on Windows/macOS.')
+                subprocess.Popen(['open', '-a', app, str(path)])
+            else:
+                raise RuntimeError('Unsupported slicer launch platform.')
+            self.results_panel.record_event('Open in slicer', f'Sent 3MF to {app}.', 'success')
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.results_panel.record_event('Slicer not opened', str(exc), 'warning')
+            QMessageBox.warning(self, 'Unable to Open Slicer',
+                'Your validated 3MF was saved, but the slicer could not be opened: ' + str(exc))
+
+    def _show_export_folder(self):
+        if not self._export_result or self._export_task is not None:
+            return
+        output = Path(self._export_result['output'])
+        if not output.is_file():
+            QMessageBox.warning(self, 'Output unavailable', 'The exported 3MF was moved or deleted.')
+            return
+        if os.name == 'nt':
+            subprocess.Popen(['explorer', '/select,', str(output)])
+        else:
+            import sys
+            if sys.platform == 'darwin':
+                subprocess.Popen(['open', '-R', str(output)])
+            else:
+                subprocess.Popen(['xdg-open', str(output.parent)])
 
     def _reset_camera(self):
         self.preview_surface.reset_camera()

@@ -107,7 +107,8 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
             direct_source_colors=standard,
             output_color_strategy=s['output_color_strategy'],
             max_output_colors=s['max_output_colors'], reference=request.reference,
-            custom_catalog_path=custom, native_template_path=s.get('native_project_template') or None,
+            # Native templates only affect final exported project settings.
+            custom_catalog_path=custom, native_template_path=None,
             quality_bias=bias, catalog_region=s['catalog_region'],
             planner_mode=s['planner_mode'], planning_sample=s['planning_sample'],
             mix_model='bambu', plan_only=True,

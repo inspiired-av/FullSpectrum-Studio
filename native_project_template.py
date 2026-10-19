@@ -305,6 +305,43 @@ def _serialized(root):
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
 
+
+def _normalize_native_slicer_metadata(root):
+    """Deduplicate slicer provenance from the saved template; never invent its version.
+
+    The template inspector already resolves duplicate keys to their last value.
+    Match that behavior, preferring the last nonempty value when possible.
+    FullSpectrum's authoring version is stored in a separate metadata key.
+    """
+    from desktop.app_support import APP_VERSION
+
+    tracked = frozenset({
+        'OrcaSlicer', 'BambuStudio', 'Application', 'BambuStudio:3mfVersion',
+        'FullSpectrumStudio:Version',
+    })
+    metadata_tag = f'{{{CORE}}}metadata'
+    grouped = {}
+    for element in list(root):
+        if element.tag == metadata_tag and element.get('name') in tracked:
+            grouped.setdefault(element.get('name'), []).append(element)
+    for key, elements in grouped.items():
+        if key == 'FullSpectrumStudio:Version':
+            for element in elements:
+                root.remove(element)
+            continue
+        preferred = next((el for el in reversed(elements) if (el.text or '').strip()),
+                         elements[-1])
+        for element in elements:
+            if element is not preferred:
+                root.remove(element)
+    provenance = ET.Element(metadata_tag, {'name': 'FullSpectrumStudio:Version'})
+    provenance.text = f'v{APP_VERSION}'
+    # Keep model metadata before <resources>; preserve other template metadata.
+    index = next((idx for idx, element in enumerate(root)
+                  if element.tag == f'{{{CORE}}}resources'), len(root))
+    root.insert(index, provenance)
+    return root
+
 def graft_native_project(source, template, destination, *, real_count):
     """Combine painted source geometry/recipes with slicer-native metadata.
 
@@ -341,6 +378,7 @@ def graft_native_project(source, template, destination, *, real_count):
         parent_id = 2
         stable_id = uuid.uuid5(uuid.NAMESPACE_URL, str(source) + '|' + str(template))
         native_main = _xml(native.read('3D/3dmodel.model'), '3D/3dmodel.model')
+        _normalize_native_slicer_metadata(native_main)
         resources = native_main.find(f'{{{CORE}}}resources')
         build = native_main.find(f'{{{CORE}}}build')
         parent = ET.SubElement(resources, f'{{{CORE}}}object', {
@@ -439,6 +477,13 @@ def graft_native_project(source, template, destination, *, real_count):
         with ZipFile(tempname) as verify:
             _safe_archive(verify)
             main = _xml(verify.read('3D/3dmodel.model'),'3D/3dmodel.model')
+            # Version provenance is checked independently of printer/process compatibility.
+            for marker in ('OrcaSlicer', 'BambuStudio', 'Application',
+                           'BambuStudio:3mfVersion', 'FullSpectrumStudio:Version'):
+                found = [el for el in main.findall(f'{{{CORE}}}metadata')
+                         if el.get('name') == marker]
+                if len(found) > 1 or (marker == 'FullSpectrumStudio:Version' and len(found) != 1):
+                    raise TemplateError('Ambiguous generated slicer provenance: ' + marker)
             if len(main.findall(f'{{{CORE}}}build/{{{CORE}}}item'))!=1:
                 raise TemplateError('Native build item missing after export')
             m = _xml(verify.read(child_path),child_path)

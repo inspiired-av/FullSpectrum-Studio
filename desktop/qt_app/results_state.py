@@ -56,8 +56,8 @@ def model_summary(model_path, template_path, slicer, dirty=False):
         'template': shorten(template),
         'slicer': shorten(slicer or 'Not selected'),
         'settings': 'Unsaved changes' if dirty else 'Saved or unchanged',
-        'conversion': 'Not run in Qt (Stage 4)',
-        'validation': 'Not run in Qt (Stage 4)',
+        'conversion': 'Not run yet',
+        'validation': 'Not run yet',
     }
 
 

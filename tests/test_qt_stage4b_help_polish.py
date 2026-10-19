@@ -40,7 +40,7 @@ class HelpPolishContractTests(unittest.TestCase):
         self.assertNotIn('SectionHelpButton(',results)
         self.assertIn("_text('CURRENT SESSION', 'sectionTitle')",results)
         self.assertIn("_text('CURRENT ACTIVITY', 'sectionTitle')",results)
-        self.assertIn("_text('EXISTING REPORT', 'sectionTitle')",results)
+        self.assertIn("_text('EXISTING / GENERATED REPORT', 'sectionTitle')",results)
 
     def test_custom_library_links_are_actual_repo_examples(self):
         source=(UI/'section_help.py').read_text(encoding='utf-8')

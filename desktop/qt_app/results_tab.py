@@ -1,17 +1,13 @@
-"""Results and activity workspace for the pre-conversion Qt desktop shell.
-
-This is read-only: users may view existing conversion/validation reports, but
-Stage 4D-A forecasts palettes but does not export 3MF or claim print validation.
-"""
+"""Results and activity workspace for validated Qt 3MF export."""
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget, QToolButton,
 )
 
 from desktop.qt_app.results_state import event_tail, model_summary, read_existing_report, shorten
@@ -26,7 +22,9 @@ def _text(value, kind=None):
 
 
 class ResultsTab(QWidget):
-    """Actual UI activity plus explicit pre-conversion/validation placeholders."""
+    open_export_requested = Signal()
+    show_export_folder_requested = Signal()
+    """Validated 3MF exports, progress, reports and current-session activity."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,7 +34,7 @@ class ResultsTab(QWidget):
         self.setObjectName('resultsTab')
         self._build()
         self.set_context('', '', 'Bambu Studio', False)
-        self.record_event('Ready', 'Stage 4D-A session initialized. No conversion has run.', 'info')
+        self.record_event('Ready', 'Stage 4D-C session initialized. No export has run.', 'info')
 
     def _build(self):
         outer = QVBoxLayout(self)
@@ -56,17 +54,14 @@ class ResultsTab(QWidget):
 
         layout.addWidget(_text('CURRENT SESSION', 'sectionTitle'))
         heading = QHBoxLayout()
-        self.phase_label = _text('Forecasting available · export inactive', 'resultsStatus')
+        self.phase_label = _text('Export not started', 'resultsStatus')
         self.phase_label.setStyleSheet('color: #89d9c3; font-weight: 600;')
         heading.addWidget(self.phase_label)
         heading.addStretch()
-        self.stage_label = _text('Stage 4D-A', 'helpText')
+        self.stage_label = _text('Stage 4D-C', 'helpText')
         heading.addWidget(self.stage_label)
         layout.addLayout(heading)
-        layout.addWidget(_text('Palette forecasts run from Plan. Native 3MF composition and validation '
-                               'are not available in this Qt stage.',
-                               'bodyMuted'))
-
+        layout.addWidget(_text('Review output settings and export your optimized native 3MF here. Live Forecast remains read-only.', 'bodyMuted'))
         details = QFrame()
         details.setObjectName('section')
         detail_layout = QVBoxLayout(details)
@@ -86,8 +81,44 @@ class ResultsTab(QWidget):
             row.addWidget(val, 1)
             detail_layout.addLayout(row)
             self.fields[key] = val
+        self.session_toggle = QToolButton()
+        self.session_toggle.setObjectName('exportSessionToggle')
+        self.session_toggle.setText('Session details ▸')
+        self.session_toggle.setCheckable(True)
+        self.session_toggle.setChecked(False)
+        self.session_toggle.toggled.connect(
+            lambda opened: self.session_toggle.setText('Session details ▾' if opened else 'Session details ▸'))
+        self.session_toggle.toggled.connect(details.setVisible)
+        layout.addWidget(self.session_toggle)
+        details.setVisible(False)
         layout.addWidget(details)
 
+        layout.addWidget(_text('EXPORT SETTINGS', 'sectionTitle'))
+        self.export_settings_mount = QWidget()
+        self.export_settings_mount.setObjectName('exportSettingsMount')
+        self.export_settings_layout = QVBoxLayout(self.export_settings_mount)
+        self.export_settings_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.export_settings_mount)
+        layout.addWidget(_text('NATIVE 3MF EXPORT', 'sectionTitle'))
+        self.export_actions_mount = QWidget()
+        self.export_actions_mount.setObjectName('exportActionsMount')
+        self.export_actions_layout = QVBoxLayout(self.export_actions_mount)
+        self.export_actions_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.export_actions_mount)
+
+        layout.addWidget(_text('VALIDATED OUTPUT', 'sectionTitle'))
+        self.export_summary = _text('No validated export in this session.', 'bodyMuted')
+        layout.addWidget(self.export_summary)
+        output_buttons = QHBoxLayout()
+        self.open_export_button = QPushButton('Open in Slicer')
+        self.open_export_button.setEnabled(False)
+        self.open_export_button.clicked.connect(lambda: self.open_export_requested.emit())
+        output_buttons.addWidget(self.open_export_button)
+        self.export_folder_button = QPushButton('Show Output Folder')
+        self.export_folder_button.setEnabled(False)
+        self.export_folder_button.clicked.connect(lambda: self.show_export_folder_requested.emit())
+        output_buttons.addWidget(self.export_folder_button)
+        layout.addLayout(output_buttons)
         layout.addWidget(_text('CURRENT ACTIVITY', 'sectionTitle'))
         self.activity_label = _text('Ready', 'helpText')
         layout.addWidget(self.activity_label)
@@ -108,6 +139,16 @@ class ResultsTab(QWidget):
         )
         self.activity_log.setMinimumHeight(130)
         self.activity_log.setMaximumHeight(175)
+        self.activity_toggle = QToolButton()
+        self.activity_toggle.setObjectName('exportActivityToggle')
+        self.activity_toggle.setText('Activity log ▸')
+        self.activity_toggle.setCheckable(True)
+        self.activity_toggle.setChecked(False)
+        self.activity_toggle.toggled.connect(
+            lambda opened: self.activity_toggle.setText('Activity log ▾' if opened else 'Activity log ▸'))
+        self.activity_toggle.toggled.connect(self.activity_log.setVisible)
+        layout.addWidget(self.activity_toggle)
+        self.activity_log.setVisible(False)
         layout.addWidget(self.activity_log)
         event_buttons = QHBoxLayout()
         clear = QPushButton('Clear Activity')
@@ -118,9 +159,9 @@ class ResultsTab(QWidget):
         event_buttons.addWidget(copy)
         layout.addLayout(event_buttons)
 
-        layout.addWidget(_text('EXISTING REPORT', 'sectionTitle'))
+        layout.addWidget(_text('EXISTING / GENERATED REPORT', 'sectionTitle'))
         layout.addWidget(_text('Open an existing FullSpectrum or slicer validation report. '
-                               'This is a read-only viewer, not a new conversion result.',
+                               'You can also inspect the report generated by a successful export.',
                                'bodyMuted'))
         report_buttons = QHBoxLayout()
         self.open_report_button = QPushButton('Open Report…')
@@ -147,15 +188,41 @@ class ResultsTab(QWidget):
         )
         self.report_view.setPlaceholderText('Select an existing report to read it here.')
         self.report_view.setMinimumHeight(220)
+        self.report_toggle = QToolButton()
+        self.report_toggle.setObjectName('exportReportToggle')
+        self.report_toggle.setText('Report viewer ▸')
+        self.report_toggle.setCheckable(True)
+        self.report_toggle.setChecked(False)
+        self.report_toggle.toggled.connect(
+            lambda opened: self.report_toggle.setText('Report viewer ▾' if opened else 'Report viewer ▸'))
+        self.report_toggle.toggled.connect(self.report_view.setVisible)
+        layout.addWidget(self.report_toggle)
+        self.report_view.setVisible(False)
         layout.addWidget(self.report_view)
-        layout.addWidget(_text('Native 3MF export, slicer launch and conversion progress remain for Stage 4D. '
-                               'Live forecasts are available on Plan.', 'helpText'))
+        layout.addWidget(_text('Engine validation checks structure, paint mapping and palette reconstruction. Confirm printer settings and slice in your chosen slicer before printing.', 'helpText'))
         layout.addStretch(1)
+
+    def attach_export_panels(self, settings, actions):
+        """Mount existing MainWindow widgets without duplicating preferences."""
+        self.export_settings_layout.addWidget(settings)
+        self.export_actions_layout.addWidget(actions)
 
     def set_context(self, model_path, template_path, slicer, dirty=False):
         for key, value in model_summary(model_path, template_path, slicer, dirty).items():
             self.fields[key].setText(value)
             self.fields[key].setToolTip(str(value))
+
+    def set_export_result(self, result):
+        '''Only call after the engine returned a fully validated result.'''
+        output = Path(result['output'])
+        self.fields['conversion'].setText(shorten(output.name, 70))
+        self.fields['conversion'].setToolTip(str(output))
+        self.fields['validation'].setText('Engine validated · 3MF archive checked')
+        self.phase_label.setText('Validated native 3MF saved')
+        self.export_summary.setText(f'{output.name} · {result.get("slicer", "Selected slicer")}')
+        self.export_summary.setToolTip(str(output))
+        self.open_export_button.setEnabled(True)
+        self.export_folder_button.setEnabled(True)
 
     def record_event(self, title, detail, severity='info'):
         """Record a real UI event; callers must only emit success on completion."""
@@ -201,6 +268,7 @@ class ResultsTab(QWidget):
         self._report_path = Path(path)
         self._report_content = content
         self.report_view.setPlainText(content)
+        self.report_toggle.setChecked(True)
         self.report_hint.setText(f'Viewing previously saved report: {shorten(self._report_path.name)}')
         self.report_hint.setToolTip(str(self._report_path))
         self.copy_report_button.setEnabled(True)

@@ -61,19 +61,19 @@ Use **Optimization Details** for the chosen physical filaments and mixer proport
     'native_project_template': HelpTopic(
         'Native Project Template',
         'Use an empty slicer 3MF containing your printer and process presets.',
-        """For later native export, save an **empty project** in Bambu Studio or OrcaSlicer:
+        """For native 3MF export, save an **empty project** in Bambu Studio or OrcaSlicer:
 
 1. Select the intended printer, nozzle, plate, process and physical filament presets.
 2. **Remove every model** from the build plate.
 3. Save as a **3MF project**, then choose it here with **Browse…**.
 
-This supplies slicer profiles; it is not the source model. Confirm the detected printer/nozzle and any compatibility warnings. Conversion and slicer launch remain part of a later stage."""),
+This supplies slicer profiles; it is not the source model. Confirm the detected printer/nozzle and any compatibility warnings. On the **Export** tab, choose your output slicer and use **Export Native 3MF**. The export validates the archive before it can be opened in the slicer."""),
     'advanced_settings': HelpTopic(
         'Advanced Settings',
         'Adjust planning effort, physical slots, quality and refresh.',
         """**Planning effort** controls search depth. **Planning sample** determines which source representation is weighted. **Physical slots** limits real materials; **Maximum palette size** separately limits physical plus mixed output colors.
 
-**Smart quality** picks the quality/waste balance automatically; turn it off to use the slider. **Automatic forecast** refreshes after valid edits. Output slicer preferences are saved now; exporting and launching the slicer are later-stage features."""),
+**Smart quality** picks the quality/waste balance automatically; turn it off to use the slider. **Automatic forecast** refreshes after valid edits. Output slicer and native template choices are located on the **Export** tab."""),
     'filament_source': HelpTopic(
         'Filament Source',
         'Use Bambu inventory/catalog colors or load your own JSON filament library.',

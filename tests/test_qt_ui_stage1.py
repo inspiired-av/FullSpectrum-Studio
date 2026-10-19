@@ -88,7 +88,7 @@ class OptionalQtSmokeTests(unittest.TestCase):
         self.addCleanup(window.close)
         self.assertEqual(window.tabs.count(), 3)
         self.assertEqual([window.tabs.tabText(i) for i in range(3)],
-                         ['Plan', 'Filaments', 'Results'])
+                         ['Plan', 'Filaments', 'Export'])
         self.assertFalse(window.compose_button.isEnabled())
         self.assertFalse(window.preview_mode.isEnabled())
         self.assertTrue(window.open_button.isEnabled())
