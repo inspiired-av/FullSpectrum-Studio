@@ -1,0 +1,109 @@
+"""Read-only source-color inventory for slicer-native, object-colored 3MFs.
+
+A Bambu/Orca 3MF may color whole objects by extruder rather than by standard
+3MF <basematerials> triangle attributes. Such projects are different from
+standard material-colored 3MF sources. This scanner returns their *object*
+colors for Qt's Stage 2B UI, not face-level paint mappings for the exporter.
+"""
+from __future__ import annotations
+
+from collections import Counter
+import json
+from pathlib import Path
+import re
+from zipfile import ZipFile
+import xml.etree.ElementTree as ET
+
+HEX = re.compile(r'^#[0-9A-Fa-f]{6}$')
+MAX_CFG_BYTES = 12_000_000
+MAX_XML_BYTES = 80_000_000
+MAX_FACES = 5_000_000
+
+
+def _read_member(archive, member, limit):
+    try:
+        info = archive.getinfo(member)
+    except KeyError as exc:
+        raise ValueError('Missing native-project member: ' + member) from exc
+    if info.file_size > limit:
+        raise ValueError('3MF member too large for protected-color inspection: ' + member)
+    return archive.read(info)
+
+
+def _local(tag):
+    return tag.rsplit('}', 1)[-1]
+
+
+def _metadata(object_node, name):
+    for child in object_node:
+        if _local(child.tag) == 'metadata' and child.get('key') == name:
+            return child.get('value')
+    return None
+
+
+def scan_native_object_colors(filename):
+    """Return counts of colors assigned to entire objects in a native 3MF.
+
+    Reject projects with facet-level painting, mixed recipes, or ambiguous
+    object coverage. Never infer a color from an STL-like uncolored mesh.
+    """
+    path = Path(filename)
+    with ZipFile(path) as archive:
+        names = archive.namelist()
+        if 'Metadata/model_settings.config' not in names or 'Metadata/project_settings.config' not in names:
+            raise ValueError('No native object-color assignments found')
+        project = json.loads(_read_member(archive, 'Metadata/project_settings.config', MAX_CFG_BYTES))
+        colors = project.get('filament_colour', [])
+        mixed = project.get('filament_is_mixed', [])
+        if not isinstance(colors, list) or not all(isinstance(c, str) and HEX.fullmatch(c) for c in colors):
+            raise ValueError('Native project has no valid filament colors')
+        if mixed and (not isinstance(mixed, list) or len(mixed) != len(colors) or '1' in mixed):
+            raise ValueError('Mixed-filament project slots are not exact solid source colors')
+        main_model = ET.fromstring(_read_member(archive, '3D/3dmodel.model', MAX_XML_BYTES))
+        app = next((child.text or '' for child in main_model
+                    if _local(child.tag) == 'metadata' and child.get('name') == 'Application'), '')
+        if not (app.startswith('BambuStudio-') or 'OrcaSlicer' in app or any(
+                child.get('name') == 'OrcaSlicer' for child in main_model if _local(child.tag) == 'metadata')):
+            raise ValueError('No recognized Bambu Studio / OrcaSlicer object-color project')
+        root = ET.fromstring(_read_member(archive, 'Metadata/model_settings.config', MAX_XML_BYTES))
+        mapping = Counter()
+        assigned_faces = 0
+        for obj in root:
+            if _local(obj.tag) != 'object':
+                continue
+            extruder, face_count = _metadata(obj, 'extruder'), None
+            for child in obj:
+                if _local(child.tag) == 'metadata' and child.get('face_count') is not None:
+                    face_count = child.get('face_count')
+                    break
+            if extruder is None or face_count is None:
+                raise ValueError('Some objects have no unambiguous filament assignment')
+            try:
+                index, faces = int(extruder) - 1, int(face_count)
+            except (TypeError, ValueError) as exc:
+                raise ValueError('Native object has an invalid extruder or face count') from exc
+            if not 0 <= index < len(colors) or faces < 0:
+                raise ValueError('Object filament references an unavailable physical slot')
+            # Paint data may appear on native sub-parts, and cannot be reduced
+            # reliably to one object-level color in that case.
+            mapping[colors[index].upper()] += faces
+            assigned_faces += faces
+        if assigned_faces <= 0 or assigned_faces > MAX_FACES:
+            raise ValueError('No valid object-assigned source faces found')
+        # Ensure the object summary describes the entire saved geometry rather
+        # than silently ignoring additional painted or unassigned mesh parts.
+        model_names = [n for n in names if n.startswith('3D/Objects/') and n.endswith('.model')]
+        if not model_names:
+            raise ValueError('No native mesh parts found')
+        actual_faces = 0
+        for name in model_names:
+            mesh_root = ET.fromstring(_read_member(archive, name, MAX_XML_BYTES))
+            for tri in mesh_root.iter():
+                if _local(tri.tag) != 'triangle':
+                    continue
+                if any(k not in ('v1', 'v2', 'v3') for k in tri.attrib):
+                    raise ValueError('Face-painted project is not safely represented by object colors')
+                actual_faces += 1
+        if assigned_faces != actual_faces:
+            raise ValueError('Native object assignments do not cover every mesh face')
+        return dict(sorted(mapping.items()))

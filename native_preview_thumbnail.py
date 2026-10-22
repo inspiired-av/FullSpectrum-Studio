@@ -39,7 +39,7 @@ def _single_paint_slot(code):
         return None
 
 
-def render_plate_preview(model_xml, palette, size=512, max_faces=25000):
+def render_plate_preview(model_xml, palette, size=512, max_faces=200000):
     """Produce a simple projected, source-painted PNG, never mutate the mesh."""
     tree = ET.fromstring(model_xml)
     vertices = []
@@ -95,8 +95,13 @@ def render_plate_preview(model_xml, palette, size=512, max_faces=25000):
     # Add an unobtrusive floor so small/dark geometry is visible.
     draw.ellipse((size*.12,size*.82,size*.88,size*.91),fill=(40,46,50))
     triangles=[]
-    step=max(1,math.ceil(len(face_nodes)/max_faces))
-    for tri in face_nodes[::step]:
+    # Never stride through individual faces: skipping facets creates holes,
+    # jagged lettering and giant back-face triangles in plate thumbnails.
+    # For extremely large meshes, retain the template preview instead of
+    # producing a misleading damaged image (the model export still succeeds).
+    if len(face_nodes) > max_faces:
+        raise ValueError('Preview mesh exceeds the full-face thumbnail safety limit')
+    for tri in face_nodes:
         try:
             indices=[int(tri.get(k)) for k in ('v1','v2','v3')]
             if any(i<0 or i>=len(vertices) for i in indices):
