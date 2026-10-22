@@ -66,6 +66,19 @@ jobs:
           set "TEST_EXIT=%ERRORLEVEL%"
           echo Python unittest process exit code: %TEST_EXIT%
           exit /b %TEST_EXIT%
+      - name: Diagnose native shutdown after regression failure
+        if: failure()
+        shell: pwsh
+        run: |
+          python packaging/windows/diagnose_unittest_shutdown.py --group-size 1
+          if ($LASTEXITCODE -ne 0) { Write-Host "At least one isolated test module failed or crashed." }
+      - name: Upload native shutdown diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Qt-Native-Shutdown-Diagnostics
+          path: shutdown_diagnostics/*
+          if-no-files-found: warn
       - name: Verify Qt imports and release entry
         shell: pwsh
         run: |
