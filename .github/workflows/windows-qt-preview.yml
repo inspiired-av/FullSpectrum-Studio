@@ -58,8 +58,14 @@ jobs:
           python -m pip install -r requirements-windows.txt -r requirements-qt.txt
           python -m pip check
       - name: Run full Python regression suite
-        shell: pwsh
-        run: python -m unittest discover -s tests -v
+        # unittest reports its result on stderr. Use cmd to isolate any
+        # PowerShell-native-command handling from the real Python exit status.
+        shell: cmd
+        run: |
+          python -m unittest discover -s tests -v
+          set "TEST_EXIT=%ERRORLEVEL%"
+          echo Python unittest process exit code: %TEST_EXIT%
+          exit /b %TEST_EXIT%
       - name: Verify Qt imports and release entry
         shell: pwsh
         run: |
