@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from qt_test_cleanup import dispose_test_widget
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +54,7 @@ class QtAssignmentShortcutTests(unittest.TestCase):
         self.source.write_bytes(b'fixture')  # scanning is mocked: no actual archive is read
         self.preferences = PlanPreferences(Path(self.tmp.name) / 'settings.json')
         self.panel = FilamentsTab(self.preferences, settings_path=Path(self.tmp.name) / 'settings.json')
-        self.addCleanup(self.panel.close)
+        self.addCleanup(dispose_test_widget, self.panel)
         self.panel.set_model(str(self.source))
 
     def test_unscanned_source_starts_scan_and_applies_selection_on_completion(self):

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from qt_test_cleanup import dispose_test_widget
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,7 +69,7 @@ class QtAutoScanTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         settings_path = Path(self.tmp.name) / 'settings.json'
         self.panel = FilamentsTab(PlanPreferences(settings_path), settings_path=settings_path)
-        self.addCleanup(self.panel.close)
+        self.addCleanup(dispose_test_widget, self.panel)
         self.model = Path(self.tmp.name) / 'sample.3mf'
         self.model.write_bytes(b'dummy: async loader is mocked')
         self.panel.set_model(str(self.model))

@@ -6,6 +6,7 @@ import importlib.util
 import os
 from pathlib import Path
 import unittest
+from qt_test_cleanup import dispose_test_widget
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -87,7 +88,7 @@ class QtBehaviorTests(unittest.TestCase):
         from PySide6.QtTest import QTest
         from desktop.qt_app.source_palette import PaletteSwatch
         swatch=PaletteSwatch('#ABCDEF',10)
-        self.addCleanup(swatch.close)
+        self.addCleanup(dispose_test_widget, swatch)
         swatch.show()
         calls=[]
         swatch.range_chosen.connect(lambda *values:calls.append(values))
@@ -101,7 +102,7 @@ class QtBehaviorTests(unittest.TestCase):
         from desktop.qt_app.source_assignments_panel import SourceAssignmentsPanel
         from PySide6.QtCore import Qt
         panel=SourceAssignmentsPanel()
-        self.addCleanup(panel.close)
+        self.addCleanup(dispose_test_widget, panel)
         options=[{'key':'white','name':'White PLA','color':'#FFFFFF'},
                  {'key':'cyan','name':'Cyan PLA','color':'#08ABFB'}]
         panel.set_assignments({'#FFFFFF':'white','#F0F0F0':'white','#112233':'cyan'},
@@ -133,7 +134,7 @@ class QtBehaviorTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             tab=FilamentsTab(PlanPreferences(Path(temp)/'s.json'),
                              settings_path=Path(temp)/'s.json')
-            self.addCleanup(tab.close)
+            self.addCleanup(dispose_test_widget, tab)
             tab.model_path='sample.3mf'
             messages=[]
             tab.activity_event.connect(lambda *a:messages.append(a))

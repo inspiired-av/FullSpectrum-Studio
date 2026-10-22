@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from qt_test_cleanup import dispose_test_widget
 
 PACKAGE = Path(__file__).resolve().parents[1]
 TARGET = PACKAGE / 'desktop/qt_app/filaments_tab.py'
@@ -49,7 +50,7 @@ class QtGeometryTests(unittest.TestCase):
         self.tab.resize(470, 330)
         self.tab.show()
         self.app.processEvents()
-        self.addCleanup(self.tab.close)
+        self.addCleanup(dispose_test_widget, self.tab)
 
     def test_short_window_scrollbar_and_no_overlap(self):
         from PySide6.QtCore import QPoint
