@@ -159,6 +159,26 @@ def _nearest_indices(template_colors, out_colors, template_mixed, real_count):
                 key=lambda j: distance(color,template_colors[j])) for i,color in enumerate(out_colors)]
 
 
+# Phase 4 v3: slicer-confirmed per-material fields. Do not indiscriminately
+# resize same-length printer/process arrays (they may be coincidental).
+MATERIAL_SLOT_FIELDS = frozenset("""activate_air_filtration additional_cooling_fan_speed additional_fan_full_speed_layer
+chamber_temperatures circle_compensation_speed close_additional_fan_first_x_layers
+close_fan_the_first_x_layers complete_print_exhaust_fan_speed cool_plate_temp
+cool_plate_temp_initial_layer cooling_perimeter_transition_distance
+cooling_slowdown_logic counter_coef_1 counter_coef_2 counter_coef_3
+counter_limit_max counter_limit_min diameter_limit during_print_exhaust_fan_speed
+enable_overhang_bridge_fan enable_pressure_advance eng_plate_temp
+eng_plate_temp_initial_layer fan_cooling_layer_time fan_max_speed fan_min_speed
+first_x_layer_fan_speed first_x_layer_part_fan_speed full_fan_speed_layer
+hole_coef_1 hole_coef_2 hole_coef_3 hole_limit_max hole_limit_min
+hot_plate_temp hot_plate_temp_initial_layer impact_strength_z ironing_fan_speed
+no_slow_down_for_cooling_on_outwalls nozzle_temperature_range_high
+nozzle_temperature_range_low overhang_fan_speed overhang_fan_threshold
+overhang_threshold_participating_cooling pre_start_fan_time pressure_advance
+reduce_fan_stop_start_freq required_nozzle_HRC slow_down_for_layer_cooling
+slow_down_layer_time supertack_plate_temp supertack_plate_temp_initial_layer
+temperature_vitrification textured_plate_temp textured_plate_temp_initial_layer""".split())
+
 def _fill_template_settings(template, planned, real_count):
     """Resize *all* recognized filament arrays from a valid slicer profile."""
     old = template['filament_colour']
@@ -168,6 +188,31 @@ def _fill_template_settings(template, planned, real_count):
         raise TemplateError('Invalid resulting physical/mixed slot count')
     mixed = template.get('filament_is_mixed', ['0']*m)
     indices = _nearest_indices(old,new,mixed,real_count)
+    variant_self = template.get('filament_self_index')
+    variant_groups = None
+    if isinstance(variant_self, list) and len(variant_self) > m:
+        # H2C stores Standard / High Flow (and sometimes E3D) as variable
+        # counts per *physical* material. Infer boundaries only from the
+        # slicer-saved slot index list, never from fixed 2- or 3-wide guesses.
+        if len(variant_self) > MAX_FILAMENTS * 6:
+            raise TemplateError('Template contains too many filament variants')
+        variant_groups = []
+        cursor = 0
+        for slot in range(1, m + 1):
+            start = cursor
+            while cursor < len(variant_self) and str(variant_self[cursor]) == str(slot):
+                cursor += 1
+            if cursor == start:
+                raise TemplateError('Invalid native filament variant sequence')
+            variant_groups.append((start, cursor))
+        if cursor != len(variant_self):
+            raise TemplateError('Invalid native filament variant sequence')
+    variant_fields = {
+        'nozzle_temperature', 'nozzle_temperature_initial_layer',
+        'long_retractions_when_ec', 'retraction_distances_when_ec',
+        'slow_down_min_speed', 'override_process_overhang_speed',
+        'volumetric_speed_coefficients',
+    }
     result = dict(template)
     for key,values in template.items():
         if not isinstance(values,list):
@@ -186,6 +231,26 @@ def _fill_template_settings(template, planned, real_count):
                             val = '120'
                         extended.append(val)
             result[key] = extended
+        elif (variant_groups is not None and len(values) == len(variant_self)
+              and (key.startswith('filament_') or key in variant_fields)):
+            # Rebuild Standard/High Flow/E3D records for the actual output
+            # slot order. This keeps the physical profile tied to its HEX
+            # anchor, even if source and planner slot orders differ.
+            if key == 'filament_self_index':
+                result[key] = [str(slot + 1)
+                               for slot, original_idx in enumerate(indices)
+                               for _ in range(variant_groups[original_idx][1] -
+                                              variant_groups[original_idx][0])]
+            else:
+                result[key] = [value
+                               for original_idx in indices
+                               for value in values[variant_groups[original_idx][0]:
+                                                   variant_groups[original_idx][1]]]
+        elif key in MATERIAL_SLOT_FIELDS and len(values) == m:
+            # Match each physical or mixed output to its native material source.
+            # This must happen before the generic filament_* logic. Values
+            # remain the exact slicer-saved strings (no inferred calibration).
+            result[key] = [values[idx] for idx in indices]
         elif (key.startswith('filament_') or key == 'default_filament_colour') and m and len(values) % m == 0:
             width = len(values)//m
             if 1 <= width <= 4:
@@ -222,6 +287,13 @@ def _fill_template_settings(template, planned, real_count):
                   'default_filament_colour'):
         if len(result.get(field,[])) != n:
             raise TemplateError(f'Native profile could not resize {field} to {n} slots')
+    for field in MATERIAL_SLOT_FIELDS:
+        original = template.get(field)
+        if isinstance(original, list) and len(original) == m:
+            if not isinstance(result.get(field), list) or len(result[field]) != n:
+                raise TemplateError(
+                    f'Native material field {field} has wrong output slot count; expected {n}'
+                )
     return result
 
 
