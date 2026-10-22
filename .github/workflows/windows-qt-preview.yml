@@ -1,0 +1,172 @@
+# Release-only packaging. Keep this workflow on release/windows-qt-preview;
+# do not merge it into the upstream feature PR stack.
+name: Windows Qt Preview
+
+on:
+  push:
+    branches:
+      - release/windows-qt-preview
+    tags:
+      - 'windows-qt-preview-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-qt-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out release snapshot
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements-windows.txt
+            requirements-qt.txt
+      - name: Resolve preview package version
+        shell: pwsh
+        run: |
+          $baseVersion = (Get-Content VERSION -Raw).Trim()
+          $short = $env:GITHUB_SHA.Substring(0, 7)
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+            if (-not $tag.StartsWith('windows-qt-preview-v')) { throw "Not a Qt preview tag: $tag" }
+            $version = $tag.Substring('windows-qt-preview-v'.Length)
+            $pattern = '^' + [regex]::Escape($baseVersion) + '-qt\.[0-9]+$'
+            if ($version -notmatch $pattern) {
+              throw "Tag version '$version' must match repository VERSION '$baseVersion' with -qt.N suffix"
+            }
+          } else {
+            $version = "$baseVersion-qt.dev.$short"
+          }
+          "QT_PREVIEW_VERSION=$version" >> $env:GITHUB_ENV
+          Write-Host "Building Windows Qt Preview $version from $env:GITHUB_SHA"
+      - name: Install Windows, Qt and packaging dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-windows.txt -r requirements-qt.txt
+          python -m pip check
+      - name: Run full Python regression suite
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+      - name: Verify Qt imports and release entry
+        shell: pwsh
+        run: |
+          python -m py_compile packaging/windows/qt_preview_entry.py desktop/qt_app/__main__.py
+          python -c "import PySide6, OpenGL, numpy, fullspectrum_engine; from desktop.qt_app.main_window import MainWindow; print('Qt frontend imports OK')"
+      - name: Freeze Qt application (not legacy Tkinter entry)
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed `
+            --name FullSpectrumStudioQt `
+            --collect-submodules OpenGL `
+            --hidden-import fullspectrum_engine `
+            --hidden-import native_project_template `
+            --hidden-import phase4_material_profiles `
+            --hidden-import direct_source_palette `
+            --hidden-import global_recipe_optimizer `
+            --hidden-import palette_budget_optimizer `
+            --hidden-import native_preview_thumbnail `
+            --hidden-import standard_3mf_import `
+            --hidden-import solid_color_overrides `
+            --hidden-import bambu_mixer_model `
+            --hidden-import orca_profile_warning `
+            --add-data "VERSION;." `
+            --add-data "LICENSE;." `
+            --add-data "THIRD_PARTY_NOTICES.md;." `
+            packaging/windows/qt_preview_entry.py
+      - name: Verify frozen Qt build and bundle notices
+        shell: pwsh
+        run: |
+          $folder = 'dist/FullSpectrumStudioQt'
+          $exe = Join-Path $folder 'FullSpectrumStudioQt.exe'
+          if (-not (Test-Path $exe)) { throw "Missing Qt executable: $exe" }
+          $plugin = Get-ChildItem $folder -Recurse -File -Filter qwindows.dll | Select-Object -First 1
+          if (-not $plugin) { throw 'PySide6 Windows platform plugin (qwindows.dll) was not bundled' }
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, docs/WINDOWS_QT_PREVIEW_RELEASE.md -Destination $folder
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $exePath = (Resolve-Path $exe).Path
+          $smoke = Start-Process -FilePath $exePath -ArgumentList '--smoke-test' -PassThru
+          try {
+            if (-not $smoke.WaitForExit(30000)) {
+              $smoke.Kill()
+              throw 'Frozen Qt smoke test timed out after 30 seconds'
+            }
+            if ($smoke.ExitCode -ne 0) { throw "Frozen Qt smoke test failed: exit $($smoke.ExitCode)" }
+          } finally {
+            Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
+          }
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -Path release -ItemType Directory -Force | Out-Null
+          $version = $env:QT_PREVIEW_VERSION
+          Compress-Archive -Path dist/FullSpectrumStudioQt `
+            -DestinationPath "release/FullSpectrum-Studio-Windows-Qt-Preview-Portable-v$version.zip" -Force
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Build separate Qt Preview installer
+        shell: pwsh
+        run: |
+          $version = $env:QT_PREVIEW_VERSION
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
+          & $iscc "/DMyAppVersion=$version" packaging/windows/FullSpectrumStudioQtPreview.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed: $LASTEXITCODE" }
+          if (-not (Get-ChildItem release -Filter '*.exe')) { throw 'Installer EXE not generated' }
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          Get-Content release/SHA256SUMS.txt
+      - name: Upload release candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: FullSpectrum-Windows-Qt-Preview
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-prerelease:
+    if: startsWith(github.ref, 'refs/tags/windows-qt-preview-v')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: FullSpectrum-Windows-Qt-Preview
+          path: release
+      - name: Publish GitHub prerelease in this fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          title="FullSpectrum Studio Windows Qt Preview (${tag#windows-qt-preview-v})"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Do not silently overwrite public assets on a reused tag.
+            echo "Release $tag already exists; refusing to clobber assets" >&2
+            exit 1
+          fi
+          gh release create "$tag" release/* \
+            --verify-tag --prerelease --title "$title" \
+            --notes-file docs/WINDOWS_QT_PREVIEW_RELEASE.md
