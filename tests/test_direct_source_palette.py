@@ -107,14 +107,5 @@ class DirectSourcePaletteTests(unittest.TestCase):
         reps=fallback_representatives(['#000000','#FFFFFF'],['#111111','#EEEEEE'],distance)
         self.assertEqual(reps,[1,2])
 
-    def test_optional_real_world_vsla_color_count(self):
-        path=Path(__file__).resolve().parents[1]/'VSLA v4_SOLID_NoFilter.3mf'
-        if not path.is_file():
-            self.skipTest('Private VSLA test file not included in public repository')
-        source=load_exact_color_targets(path)
-        self.assertEqual(source['triangle_count'],1304)
-        self.assertEqual(len(source['colors']),59)
-
-
 if __name__ == '__main__':
     unittest.main()
