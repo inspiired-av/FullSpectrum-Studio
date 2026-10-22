@@ -116,6 +116,20 @@ def _upload_projection_view(gl, location, matrix):
                           array('f', matrix.copyDataTo()).tobytes())
 
 
+def _camera_clip_planes(radius, distance):
+    """Maintain depth-buffer precision while allowing a close-up orbit.
+
+    Do not let near collapse to 0.001 as the camera approaches the mesh: a
+    huge far/near ratio amplifies z-fighting on tightly spaced colored faces.
+    This is purely a display-camera change, never a geometry modification.
+    """
+    r = max(float(radius), 0.001)
+    d = max(float(distance), r * 0.00001)
+    near = max(0.002 * r, 0.05 * d)
+    far = max(near * 2.0, d + 1.5 * r)
+    return near, far
+
+
 class ModelViewport(QOpenGLWidget):
     render_error = Signal(str)
     background_clicked = Signal()
@@ -230,6 +244,7 @@ class ModelViewport(QOpenGLWidget):
             from OpenGL import GL as gl
             self._gl=gl
             gl.glEnable(gl.GL_DEPTH_TEST)
+            gl.glEnable(gl.GL_MULTISAMPLE)  # Use the MSAA requested from Qt when supported.
             gl.glDepthFunc(gl.GL_LEQUAL)
             gl.glDisable(gl.GL_CULL_FACE)  # double-sided: source meshes may have varied winding
             vs=gl.glCreateShader(gl.GL_VERTEX_SHADER)
@@ -295,8 +310,8 @@ class ModelViewport(QOpenGLWidget):
             eye=target+direction*eye_distance
             view=QMatrix4x4();view.lookAt(eye,target,QVector3D(0,0,1))
             projection=QMatrix4x4()
-            projection.perspective(45.,max(0.01,self.width()/max(1,self.height())),
-                                   max(0.001,eye_distance-radius*2.1),eye_distance+radius*3.0)
+            near,far=_camera_clip_planes(radius,eye_distance)
+            projection.perspective(45.,max(0.01,self.width()/max(1,self.height())), near,far)
             mvp=projection*view
             gl.glUseProgram(self._program)
             if self._influence_dirty:self._upload_influence_texture()

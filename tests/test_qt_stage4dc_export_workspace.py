@@ -65,16 +65,19 @@ class ExportWorkspaceContracts(unittest.TestCase):
         self.assertIn("result.get('validation') != 'OK'",svc)
 
     def test_results_present_export_and_keep_logs_optional(self):
-        for token in ('EXPORT SETTINGS', 'NATIVE 3MF EXPORT', 'VALIDATED OUTPUT',
-                      'EXISTING / GENERATED REPORT', 'CURRENT ACTIVITY',
+        # Stage 5 unified Activity and Report into one viewer and removed
+        # separate full-width headers. Validate behavior-bearing widgets.
+        for token in ('self.export_settings_mount = QWidget()',
+                      'self.export_actions_mount = QWidget()',
+                      'self.validated_output_panel = QWidget()',
+                      'self.diagnostics_stack = QStackedWidget()',
+                      'self.activity_log = QPlainTextEdit()',
+                      'self.report_view = QPlainTextEdit()',
                       'def attach_export_panels', 'exportActivityToggle',
-                      'exportReportToggle', 'self.report_toggle.setChecked(True)'):
-            self.assertIn(token,self.results)
-        self.assertLess(self.results.index("_text('VALIDATED OUTPUT'"),
-                        self.results.index("_text('CURRENT ACTIVITY'"))
+                      'exportReportToggle', 'self.report_toggle.setChecked(report)'):
+            self.assertIn(token, self.results)
         self.assertNotIn('self.compose_button =', self.results)
         self.assertNotIn('help_heading(', self.results)
-
 
 try:
     from PySide6.QtWidgets import QApplication, QLineEdit

@@ -127,7 +127,9 @@ class RuntimeContractTests(unittest.TestCase):
 
     def test_window_stage_version_and_gating(self):
         window=(ROOT/'desktop/qt_app/main_window.py').read_text(encoding='utf-8')
-        self.assertRegex(window, r'UI prototype · Stage 4D-[A-Z]\d*')
+        # The development-stage badge was intentionally removed in Stage 5.
+        self.assertNotIn('UI prototype · Stage',window)
+        self.assertIn('h.addWidget(_label("v" + APP_VERSION, "bodyMuted"))',window)
         self.assertIn('def _filament_decision(self):',window)
         self.assertIn('if not decision.ready:',window)
         self.assertIn('preserve_camera=True',window)

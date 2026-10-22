@@ -29,7 +29,10 @@ class HeadlessStagingContracts(unittest.TestCase):
     def test_source_and_stage_controls_are_explicit(self):
         s=MAIN.read_text(encoding='utf-8')
         tab=TAB.read_text(encoding='utf-8')
-        self.assertIn('UI prototype · Stage 4D-D3',s)
+        # D3 scheduling behavior remains even though the old prototype badge
+        # no longer appears in the Stage 5 application header.
+        self.assertNotIn('UI prototype · Stage',s)
+        self.assertIn('h.addWidget(_label("v" + APP_VERSION, "bodyMuted"))',s)
         self.assertIn("QPushButton('Update Forecast')",s)
         self.assertIn('self.filaments_panel.explicit_refresh_requested.connect(self._stage_filament_forecast)',s)
         self.assertIn('self._forecast_timer.timeout.connect(self._automatic_forecast_due)',s)

@@ -7,13 +7,14 @@ import subprocess
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QEvent, QTimer
+from PySide6.QtCore import Qt, QEvent, QTimer, QSignalBlocker
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QScrollArea, QSlider, QSplitter, QTabWidget,
     QLineEdit, QCheckBox, QToolButton, QMessageBox, QMenu, QFormLayout,
     QVBoxLayout, QGridLayout, QLayout, QWidget, QSizePolicy, QProgressBar,
+    QStackedWidget, QRadioButton,
 )
 
 from desktop.app_support import APP_VERSION
@@ -44,6 +45,9 @@ from desktop.qt_app.forecast_countdown_overlay import (
     ForecastCountdownTimer, ForecastCountdownOverlay,
 )
 from desktop.qt_app.results_tab import ResultsTab
+from desktop.qt_app.export_ui_icons import export_icon, compact_icon_button
+from desktop.qt_app.export_slicer_segment import ExportSlicerSegment
+from PySide6.QtCore import QSize
 from desktop.qt_app.shell_state import (
     ShellState, display_filename, MODEL_FILE_FILTER, REFERENCE_FILE_FILTER,
 )
@@ -163,7 +167,6 @@ class MainWindow(QMainWindow):
         brand.addWidget(self.project_subtitle)
         h.addLayout(brand)
         h.addStretch()
-        h.addWidget(_label("UI prototype · Stage 4D-D3", "badge"))
         self.open_button = QPushButton("Open Model")
         self.open_button.setObjectName("openModelButton")
         self.open_button.clicked.connect(self._open_model)
@@ -482,115 +485,326 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(index)
 
     def _build_export_settings(self):
-        """Export-only choices, backed by the existing PlanPreferences model."""
+        """Stage 5 v3: compact two-column setup, independent details disclosures."""
         panel = QWidget()
         panel.setObjectName('exportSettingsPanel')
-        col = _column(panel, margins=(0, 0, 0, 0), spacing=8)
-        col.addWidget(help_heading("native_project_template", "NATIVE PROJECT TEMPLATE"))
+        col = _column(panel, margins=(0, 0, 0, 0), spacing=9)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+
+        # First row: matching filename/directory pickers. Keep full paths in
+        # tooltips; Qt's line edit handles ellipsis/scroll without truncation.
+        template_box = QWidget()
+        template_col = _column(template_box, margins=(0, 0, 0, 0), spacing=5)
+        template_title = QHBoxLayout()
+        template_title.setContentsMargins(0, 0, 0, 0)
+        template_title.setSpacing(4)
+        template_help = help_heading('native_project_template', 'NATIVE TEMPLATE')
+        template_help.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        template_title.addWidget(template_help)
+        template_title.addStretch()
+        template_col.addLayout(template_title)
         template_row = QHBoxLayout()
+        template_row.setContentsMargins(0, 0, 0, 0)
+        template_row.setSpacing(5)
         self.template_path = QLineEdit()
-        self.template_path.setObjectName("nativeTemplatePath")
+        self.template_path.setObjectName('nativeTemplatePath')
         self.template_path.setReadOnly(True)
-        self.template_path.setPlaceholderText("Select a blank slicer-saved 3MF project")
+        self.template_path.setMinimumWidth(0)
+        self.template_path.setMinimumHeight(34)
+        self.template_path.setPlaceholderText('Choose a 3MF template…')
         template_row.addWidget(self.template_path, 1)
-        self.template_browse = QPushButton("Browse…")
+        self.template_browse = QPushButton()
+        compact_icon_button(self.template_browse, 'folder', 'Browse native project template', side=34)
         self.template_browse.clicked.connect(self._browse_template)
         template_row.addWidget(self.template_browse)
-        col.addLayout(template_row)
-        template_actions = QHBoxLayout()
-        self.template_clear = QPushButton("Clear")
+        self.template_clear = QPushButton()
+        compact_icon_button(self.template_clear, 'x', 'Clear native project template', side=34)
         self.template_clear.clicked.connect(self._clear_template)
-        template_actions.addWidget(self.template_clear)
-        template_actions.addStretch()
-        col.addLayout(template_actions)
-        self.template_status = _label("No native project template selected.", "templateStatus", wrap=True)
-        col.addWidget(self.template_status)
-        self.template_compatibility = _label("", "templateWarning", wrap=True)
-        col.addWidget(self.template_compatibility)
-        slicer_panel = self._section()
-        form = QFormLayout(slicer_panel)
-        form.setContentsMargins(10, 10, 10, 10)
-        form.setSpacing(9)
-        self.auto_open = QCheckBox("Open validated output automatically")
-        self.auto_open.setToolTip("Open the validated 3MF in your chosen slicer after a successful export.")
-        form.addRow(self.auto_open)
-        self.output_application = self._choice(OUTPUT_SLICERS)
-        form.addRow("Output slicer", self.output_application)
-        # Portable/nightly slicer executable choice mirrors the existing Tkinter
-        # settings, and now launches a slicer only after validated export.
-        self.slicer_executable_row = QWidget()
-        slicer_controls = QHBoxLayout(self.slicer_executable_row)
-        slicer_controls.setContentsMargins(0, 0, 0, 0)
-        slicer_controls.setSpacing(6)
-        self.slicer_executable_browse = QPushButton("Choose EXE…")
-        self.slicer_executable_browse.setObjectName("slicerExecutableBrowse")
-        self.slicer_executable_browse.clicked.connect(self._browse_slicer_executable)
-        slicer_controls.addWidget(self.slicer_executable_browse)
-        self.slicer_executable_auto = QPushButton("Auto")
-        self.slicer_executable_auto.setObjectName("slicerExecutableAuto")
-        self.slicer_executable_auto.clicked.connect(self._clear_slicer_executable)
-        slicer_controls.addWidget(self.slicer_executable_auto)
-        form.addRow("Slicer executable", self.slicer_executable_row)
-        self.slicer_executable_status = _label("Automatic executable detection", "helpText", wrap=True)
-        self.slicer_executable_status.setObjectName("slicerExecutableStatus")
-        form.addRow("", self.slicer_executable_status)
-        col.addWidget(slicer_panel)
-        col.addWidget(_label('OUTPUT DIRECTORY', 'sectionTitle'))
+        template_row.addWidget(self.template_clear)
+        template_col.addLayout(template_row)
+        grid.addWidget(template_box, 0, 0)
+
+        directory_box = QWidget()
+        directory_col = _column(directory_box, margins=(0, 0, 0, 0), spacing=5)
+        directory_title = QHBoxLayout()
+        directory_title.setContentsMargins(0, 0, 0, 0)
+        directory_title.addWidget(_label('OUTPUT DIRECTORY', 'sectionTitle'))
+        directory_title.addStretch()
+        directory_col.addLayout(directory_title)
         directory_row = QHBoxLayout()
+        directory_row.setContentsMargins(0, 0, 0, 0)
+        directory_row.setSpacing(5)
         self.export_directory = QLineEdit()
         self.export_directory.setObjectName('exportOutputDirectory')
         self.export_directory.setReadOnly(True)
+        self.export_directory.setMinimumWidth(0)
+        self.export_directory.setMinimumHeight(34)
         self.export_directory.setPlaceholderText('Model folder (default)')
-        self.export_directory.setToolTip('Defaults to the source model folder. Browse to choose another folder for this session.')
+        self.export_directory.setToolTip('Defaults to the source model folder. Choose another folder for this session.')
         directory_row.addWidget(self.export_directory, 1)
-        self.export_directory_browse = QPushButton('Browse…')
+        self.export_directory_browse = QPushButton()
         self.export_directory_browse.setObjectName('exportDirectoryBrowse')
+        compact_icon_button(self.export_directory_browse, 'folder', 'Browse output directory', side=34)
         self.export_directory_browse.clicked.connect(self._choose_export_directory)
         directory_row.addWidget(self.export_directory_browse)
-        col.addLayout(directory_row)
-        col.addWidget(_label('Validated output and reports are saved together; existing files are not overwritten.',
-                              'helpText', wrap=True))
-        preferences_row = QHBoxLayout()
+        # Match the two path-entry widths even though only a template can be
+        # cleared; reserve the rightmost clear-button column on both sides.
+        directory_row.addSpacing(39)
+        directory_col.addLayout(directory_row)
+        grid.addWidget(directory_box, 0, 1)
+
+        # Actionable warnings start open, but can be collapsed into one compact
+        # amber line. They are independent of the advanced executable settings.
+        self.template_attention = QToolButton()
+        self.template_attention.setObjectName('exportTemplateAttention')
+        self.template_attention.setIcon(export_icon('alert', '#e9b66c'))
+        self.template_attention.setIconSize(QSize(16, 16))
+        self.template_attention.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.template_attention.setText('Template compatibility  ▾')
+        self.template_attention.setCheckable(True)
+        self.template_attention.setMinimumHeight(26)
+        self.template_attention.setToolTip('Show or hide template compatibility details')
+        self.template_attention.setStyleSheet(
+            'QToolButton { color: #edbf73; font-weight: 600; '
+            'border: 0; background: transparent; padding: 2px 4px; text-align: left; }'
+            'QToolButton:hover { background: #302b22; border-radius: 5px; }')
+        self.template_attention.hide()
+        grid.addWidget(self.template_attention, 1, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
+        self.template_warning_panel = QFrame()
+        self.template_warning_panel.setObjectName('exportTemplateWarningPanel')
+        self.template_warning_panel.setStyleSheet(
+            'QFrame#exportTemplateWarningPanel { background: #27251f; '
+            'border: 1px solid #6d5739; border-radius: 6px; }')
+        warning_col = _column(self.template_warning_panel, margins=(10, 8, 10, 8), spacing=4)
+        self.template_status = _label('No template selected.', 'templateStatus', wrap=True)
+        warning_col.addWidget(self.template_status)
+        self.template_compatibility = _label('', 'templateWarning', wrap=True)
+        warning_col.addWidget(self.template_compatibility)
+        self.template_warning_panel.hide()
+        self.template_attention.toggled.connect(self._toggle_template_warning)
+        grid.addWidget(self.template_warning_panel, 2, 0, 1, 2)
+
+        # Slicer controls and Advanced share one baseline across columns.
+        slicer_box = QWidget()
+        slicer_col = _column(slicer_box, margins=(0, 0, 0, 0), spacing=5)
+        slicer_heading = _label('OUTPUT SLICER', 'sectionTitle')
+        slicer_heading.setFixedHeight(20)
+        slicer_col.addWidget(slicer_heading)
+        self.output_application = self._choice(OUTPUT_SLICERS)
+        self.output_application.setParent(slicer_box)
+        self.output_application.hide()  # Real PlanPreferences source of truth.
+        self.slicer_segment = ExportSlicerSegment()
+        self.slicer_segment.setObjectName('exportSlicerSegment')
+        self.slicer_segment.setMaximumWidth(268)
+        self.slicer_segment.setMinimumHeight(36)
+        self.slicer_segment.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        slicer_row = QHBoxLayout(self.slicer_segment)
+        slicer_row.setContentsMargins(0, 0, 0, 0)
+        slicer_row.setSpacing(0)
+        self.slicer_choice_buttons = {}
+        for title, value in (('OrcaSlicer', 'OrcaSlicer'), ('Bambu Studio', 'Bambu Studio')):
+            button = QPushButton(title, self.slicer_segment)
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setObjectName('slicerChoiceOrca' if value == 'OrcaSlicer' else 'slicerChoiceBambu')
+            button.setToolTip('Open validated exports in ' + title)
+            # The enclosing canvas draws the single continuous background,
+            # active pill and whole-container hover. Buttons provide hit targets
+            # and keyboard navigation only; their hover must remain transparent.
+            button.setStyleSheet(
+                'QPushButton { background: transparent; color: #e1e4e9; border: none; '
+                'border-radius: 0; padding: 5px 7px; }'
+                'QPushButton:hover { background: transparent; }'
+                'QPushButton:pressed { background: transparent; }'
+                'QPushButton:checked { background: transparent; color: white; font-weight: 600; }')
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            button.setMinimumHeight(36)
+            button.clicked.connect(
+                lambda _checked=False, v=value: self._set_combo_value(self.output_application, v))
+            self.slicer_choice_buttons[value] = button
+            self.slicer_segment.watch_button(button)
+            slicer_row.addWidget(button, 1)
+        slicer_col.addWidget(self.slicer_segment, 0, Qt.AlignmentFlag.AlignLeft)
+        self.output_application.currentIndexChanged.connect(self._sync_slicer_choice_buttons)
+        self._sync_slicer_choice_buttons()
+        grid.addWidget(slicer_box, 3, 0, Qt.AlignmentFlag.AlignTop)
+
+        options_box = QWidget()
+        options_col = _column(options_box, margins=(0, 0, 0, 0), spacing=5)
+        options_heading = _label('AFTER EXPORTING', 'sectionTitle')
+        options_heading.setFixedHeight(20)
+        options_col.addWidget(options_heading)
+        options_row = QHBoxLayout()
+        options_row.setContentsMargins(0, 0, 0, 0)
+        options_row.setSpacing(6)
+        self.auto_open = QCheckBox('Open automatically')
+        self.auto_open.setToolTip('Open validated output in the selected slicer after export.')
+        self.auto_open.setMinimumHeight(36)
+        options_row.addWidget(self.auto_open, 1)
+        self.export_advanced_toggle = QToolButton()
+        self.export_advanced_toggle.setObjectName('exportAdvancedToggle')
+        self.export_advanced_toggle.setText('Advanced')
+        self.export_advanced_toggle.setIcon(export_icon('settings'))
+        self.export_advanced_toggle.setIconSize(QSize(16, 16))
+        self.export_advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.export_advanced_toggle.setMinimumHeight(36)
+        self.export_advanced_toggle.setCheckable(True)
+        self.export_advanced_toggle.setToolTip('Advanced slicer executable and preference settings')
+        options_row.addWidget(self.export_advanced_toggle)
+        options_col.addLayout(options_row)
+        grid.addWidget(options_box, 3, 1, Qt.AlignmentFlag.AlignTop)
+        col.addLayout(grid)
+
+        # Only slicer-launch configuration belongs under Advanced. The mode
+        # mirrors the existing per-slicer executable preference; selecting
+        # Custom without choosing a file never invents a saved EXE path.
+        self.export_advanced_panel = QFrame()
+        self.export_advanced_panel.setObjectName('exportAdvancedPanel')
+        self.export_advanced_panel.setStyleSheet(
+            'QFrame#exportAdvancedPanel { background: #1a222a; '
+            'border: 1px solid #364652; border-radius: 6px; }')
+        advanced_col = _column(self.export_advanced_panel, margins=(12, 10, 12, 10), spacing=7)
+        advanced_col.addWidget(_label('SLICER LAUNCH', 'sectionTitle'))
+        self.slicer_executable_row = QWidget()
+        executable_col = _column(self.slicer_executable_row, margins=(0, 0, 0, 0), spacing=7)
+        launch_modes = QHBoxLayout()
+        launch_modes.setContentsMargins(0, 0, 0, 0)
+        launch_modes.setSpacing(16)
+        self.slicer_executable_auto = QRadioButton('Automatic detection')
+        self.slicer_executable_auto.setObjectName('slicerExecutableAuto')
+        self.slicer_executable_auto.setToolTip('Find the installed executable for the selected slicer.')
+        self.slicer_executable_custom = QRadioButton('Custom executable')
+        self.slicer_executable_custom.setObjectName('slicerExecutableCustom')
+        self.slicer_executable_custom.setToolTip('Use a portable, nightly, or manually installed slicer.')
+        launch_modes.addWidget(self.slicer_executable_auto)
+        launch_modes.addWidget(self.slicer_executable_custom)
+        launch_modes.addStretch(1)
+        executable_col.addLayout(launch_modes)
+        self.slicer_custom_controls = QWidget()
+        custom_row = QHBoxLayout(self.slicer_custom_controls)
+        custom_row.setContentsMargins(0, 0, 0, 0)
+        custom_row.setSpacing(8)
+        self.slicer_executable_status = _label('automatic executable detection', 'helpText')
+        self.slicer_executable_status.setObjectName('slicerExecutableStatus')
+        self.slicer_executable_status.setWordWrap(False)
+        self.slicer_executable_status.setMinimumWidth(0)
+        self.slicer_executable_status.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        custom_row.addWidget(self.slicer_executable_status, 1)
+        self.slicer_executable_browse = QPushButton('Browse…')
+        self.slicer_executable_browse.setIcon(export_icon('folder'))
+        self.slicer_executable_browse.setIconSize(QSize(16, 16))
+        self.slicer_executable_browse.setMinimumHeight(34)
+        self.slicer_executable_browse.setObjectName('slicerExecutableBrowse')
+        self.slicer_executable_browse.clicked.connect(self._browse_slicer_executable)
+        custom_row.addWidget(self.slicer_executable_browse)
+        executable_col.addWidget(self.slicer_custom_controls)
+        self.slicer_executable_auto.toggled.connect(self._automatic_slicer_mode_selected)
+        self.slicer_executable_custom.toggled.connect(self._custom_slicer_mode_selected)
+        advanced_col.addWidget(self.slicer_executable_row)
+        self.export_advanced_toggle.toggled.connect(self.export_advanced_panel.setVisible)
+        self.export_advanced_panel.hide()
+        col.addWidget(self.export_advanced_panel)
+
+        # Save/Revert is contextual, not an advanced executable preference.
+        # The row is absent entirely until any PlanPreferences value is dirty.
+        self.export_preferences_row = QWidget()
+        preference_buttons = QHBoxLayout(self.export_preferences_row)
+        preference_buttons.setContentsMargins(0, 0, 0, 0)
+        preference_buttons.setSpacing(7)
+        preference_buttons.addWidget(_label('UNSAVED SETTINGS', 'sectionTitle'))
+        preference_buttons.addStretch(1)
         self.export_save_settings_button = QPushButton('Save Settings')
+        self.export_save_settings_button.setIcon(export_icon('save'))
+        self.export_save_settings_button.setMinimumHeight(34)
         self.export_save_settings_button.setObjectName('exportSaveSettings')
         self.export_save_settings_button.clicked.connect(self._save_plan_settings)
-        preferences_row.addWidget(self.export_save_settings_button)
+        preference_buttons.addWidget(self.export_save_settings_button)
         self.export_revert_settings_button = QPushButton('Revert')
+        self.export_revert_settings_button.setIcon(export_icon('reset'))
+        self.export_revert_settings_button.setMinimumHeight(34)
         self.export_revert_settings_button.setObjectName('exportRevertSettings')
         self.export_revert_settings_button.clicked.connect(self._revert_plan_settings)
-        preferences_row.addWidget(self.export_revert_settings_button)
-        col.addLayout(preferences_row)
+        preference_buttons.addWidget(self.export_revert_settings_button)
+        self.export_preferences_row.hide()
+        col.addWidget(self.export_preferences_row)
         return panel
+    def _toggle_template_warning(self, checked):
+        """Only this disclosure controls template information, not Advanced."""
+        self.template_warning_panel.setVisible(bool(checked))
+        self.template_attention.setText(
+            ('Compatibility warning' if (
+                self.template_compatibility.text().strip() or
+                self.template_status.objectName() == 'templateStatusError'
+            ) else 'Template required') + ('  ▾' if checked else '  ▸'))
+    def _sync_slicer_choice_buttons(self, *_unused):
+        """Mirror saved preference in transparent hit targets and painted pill."""
+        value = self.output_application.currentData()
+        for key, button in self.slicer_choice_buttons.items():
+            button.setChecked(key == value)
+        self.slicer_segment.set_selected(1 if value == 'Bambu Studio' else 0)
 
     def _build_export_actions(self):
-        """Only the export button, live progress, and cancellation belong here."""
+        """One export action footprint: ready button or progress plus Cancel."""
         panel = QWidget()
         panel.setObjectName('exportActionsPanel')
-        col = _column(panel, margins=(0, 0, 0, 0), spacing=8)
-        self.compose_button = QPushButton("Export Native 3MF…")
-        self.compose_button.setObjectName("primary")
+        col = _column(panel, margins=(0, 0, 0, 0), spacing=5)
+        self.export_section_divider = QFrame()
+        self.export_section_divider.setObjectName('exportActionDivider')
+        self.export_section_divider.setFixedHeight(1)
+        self.export_section_divider.setStyleSheet('background: #36414b; border: none;')
+        col.addWidget(self.export_section_divider)
+        col.addSpacing(8)
+        export_row = QHBoxLayout()
+        export_row.setContentsMargins(0, 0, 0, 0)
+        export_row.setSpacing(6)
+        self.export_action_stack = QStackedWidget()
+        self.export_action_stack.setObjectName('exportActionStack')
+        self.compose_button = QPushButton('Export Native 3MF')
+        self.compose_button.setObjectName('primary')
         self.compose_button.setAccessibleName('export3mfButton')
         self.compose_button.setEnabled(False)
-        self.compose_button.setToolTip('Generate and validate a native 3MF, recipe CSV and reports with the existing FullSpectrum engine.')
+        self.compose_button.setToolTip('Generate and validate a native 3MF, recipe CSV, and report.')
         self.compose_button.clicked.connect(self._begin_export)
-        col.addWidget(self.compose_button)
+        self.compose_button.setIcon(export_icon('export'))
+        self.compose_button.setIconSize(QSize(18, 18))
+        self.compose_button.setMinimumHeight(36)
+        self.export_action_stack.addWidget(self.compose_button)
         self.export_progress = QProgressBar()
         self.export_progress.setObjectName('exportProgress')
         self.export_progress.setRange(0, 100)
-        self.export_progress.setVisible(False)
-        col.addWidget(self.export_progress)
-        self.export_status = _label('Choose a model and configure filaments to enable export.', 'helpText', wrap=True)
-        self.export_status.setObjectName('exportStatus')
-        col.addWidget(self.export_status)
-        export_actions = QHBoxLayout()
-        self.export_cancel_button = QPushButton('Cancel Export')
+        self.export_progress.setFormat('Exporting native 3MF  ·  %p%')
+        self.export_progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.export_progress.setMinimumHeight(36)
+        self.export_progress.setStyleSheet(
+            'QProgressBar#exportProgress { background: #202c3d; color: #f1f6ff; '
+            'border: 1px solid #375781; border-radius: 6px; text-align: center; '
+            'font-weight: 600; }'
+            'QProgressBar#exportProgress::chunk { background: #357fee; border-radius: 5px; }')
+        self.export_action_stack.addWidget(self.export_progress)
+        export_row.addWidget(self.export_action_stack, 1)
+        self.export_cancel_button = QPushButton('Cancel')
         self.export_cancel_button.setObjectName('cancelExportButton')
+        self.export_cancel_button.setIcon(export_icon('x'))
+        self.export_cancel_button.setIconSize(QSize(16, 16))
+        self.export_cancel_button.setMinimumHeight(36)
+        self.export_cancel_button.setMinimumWidth(90)
+        self.export_cancel_button.setToolTip('Request cancellation at the next safe export checkpoint')
         self.export_cancel_button.setEnabled(False)
         self.export_cancel_button.clicked.connect(self._cancel_export)
-        export_actions.addWidget(self.export_cancel_button)
-        col.addLayout(export_actions)
-        col.addWidget(_label('Export runs separately from the read-only Live Forecast. Printer settings and slicing must still be reviewed in your slicer.',
-                              'helpText', wrap=True))
+        self.export_cancel_button.setVisible(False)
+        export_row.addWidget(self.export_cancel_button)
+        col.addLayout(export_row)
+        self.export_status = _label('', 'helpText', wrap=True)
+        self.export_status.setObjectName('exportStatus')
+        self.export_status.hide()
+        col.addWidget(self.export_status)
         return panel
 
     def _show_export_tab(self):
@@ -997,6 +1211,7 @@ class MainWindow(QMainWindow):
             "higher values prioritize color accuracy."
         )
         self._refresh_template_status()
+        self._update_export_template_attention()
         self._refresh_slicer_executable_status()
 
     def _update_plan_dirty_state(self):
@@ -1007,6 +1222,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'export_save_settings_button'):
             self.export_save_settings_button.setEnabled(dirty)
             self.export_revert_settings_button.setEnabled(dirty)
+            self.export_preferences_row.setVisible(dirty)
         if hasattr(self, 'results_panel'):
             self._refresh_results_context()
 
@@ -1053,15 +1269,16 @@ class MainWindow(QMainWindow):
                 f"{details['slicer']} {details['slicerVersion']} · "
                 f"{details['printerPreset']} · {details['nozzle']} mm · {details['processPreset']}")
             self._repolish_template_status()
-            from orca_profile_warning import orca_h2c_warning
-            warning = orca_h2c_warning(details, self.output_application.currentData())
-            # Template ancestry and selected output application are independent.
-            # A warning is not proof that a newer slicer release is compatible.
+            # The selected launch target takes precedence. Do not also show
+            # Orca-specific H2C release guidance when launching in Bambu Studio.
             selected_app = self.output_application.currentData()
-            if details.get('slicer') and selected_app and details['slicer'] != selected_app:
-                mismatch = (f"Template was saved by {details['slicer']}, but output opens in "
-                            f"{selected_app}. Use a matching native template if possible.")
-                warning = (warning + '\n' if warning else '') + mismatch
+            template_app = details.get('slicer')
+            if template_app and selected_app and template_app != selected_app:
+                warning = (f"Template was saved by {template_app}, but output opens in "
+                           f"{selected_app}. Use a matching native template if possible.")
+            else:
+                from orca_profile_warning import orca_h2c_warning
+                warning = orca_h2c_warning(details, selected_app)
             if warning:
                 self.template_compatibility.setText(warning)
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
@@ -1069,6 +1286,45 @@ class MainWindow(QMainWindow):
             self.template_status.setText("Template unavailable or invalid: " + str(exc))
             self._repolish_template_status()
 
+    def _update_export_template_attention(self):
+        """Show an actionable compatibility notice without hiding real warnings.
+
+        A new compatibility problem opens by default, but a user-collapsed
+        notice stays collapsed until the underlying problem changes.
+        """
+        if not hasattr(self, 'template_attention'):
+            return
+        missing = not self.template_path.text().strip()
+        error = self.template_status.objectName() == 'templateStatusError'
+        message = self.template_compatibility.text().strip()
+        if missing:
+            short = 'Select a native 3MF template'
+            detail = self.template_status.text()
+        elif error:
+            short = 'Native template unavailable'
+            detail = self.template_status.text()
+        elif message:
+            short = 'Slicer / template compatibility warning'
+            detail = message
+        else:
+            short = ''
+            detail = ''
+        self.template_attention.setToolTip(detail)
+        self.template_attention.setAccessibleName(short or 'Template compatibility')
+        key = (self.template_path.text().strip(),
+               self.output_application.currentData(), short, detail)
+        if key != getattr(self, '_export_template_warning_key', None):
+            self._export_template_warning_key = key
+            # A genuinely unsafe/incompatible selection needs immediate
+            # visibility. Do not expand the missing-template hint on startup.
+            self.template_attention.setChecked(bool(error or message))
+        if not short:
+            self.template_attention.setChecked(False)
+        self.template_attention.setVisible(bool(short))
+        self.template_warning_panel.setVisible(bool(short) and self.template_attention.isChecked())
+        self.template_attention.setText(
+            ('Compatibility warning' if (message or error) else 'Template required')
+            + ('  ▾' if self.template_attention.isChecked() else '  ▸'))
     def _repolish_template_status(self):
         # Qt caches widget styles: changing objectName requires re-polishing.
         style = self.template_status.style()
@@ -1080,20 +1336,41 @@ class MainWindow(QMainWindow):
         return ("orcaslicer_executable" if self.output_application.currentData() == "OrcaSlicer"
                 else "bambu_studio_executable")
 
-    def _refresh_slicer_executable_status(self):
-        selected = self.output_application.currentData() or "Bambu Studio"
-        path = self.plan_preferences.get(self._selected_slicer_executable_key()).strip()
-        self.slicer_executable_auto.setEnabled(bool(path))
-        if not path:
-            self.slicer_executable_status.setText(
-                f"{selected}: automatic executable detection.")
-        elif not Path(path).is_file():
-            self.slicer_executable_status.setText(
-                f"{selected}: saved EXE not found: {path}. Choose a new executable or select Auto.")
-        else:
-            self.slicer_executable_status.setText(f"{selected}: {path}")
-        self.slicer_executable_status.setToolTip(path)
+    def _automatic_slicer_mode_selected(self, checked):
+        if checked and self.plan_preferences.get(self._selected_slicer_executable_key()).strip():
+            self._clear_slicer_executable()
+        if checked:
+            self.slicer_custom_controls.hide()
 
+    def _custom_slicer_mode_selected(self, checked):
+        if checked:
+            self.slicer_custom_controls.show()
+            if not self.plan_preferences.get(self._selected_slicer_executable_key()).strip():
+                self.slicer_executable_status.setText('Select an executable with Browse…')
+                self.slicer_executable_status.setToolTip('Choose a portable or nightly slicer EXE.')
+
+    def _refresh_slicer_executable_status(self):
+        selected = self.output_application.currentData() or 'Bambu Studio'
+        path = self.plan_preferences.get(self._selected_slicer_executable_key()).strip()
+        # Programmatic restores must not fire the radio change handlers,
+        # otherwise revisiting a saved Custom mode would clear its preference.
+        with QSignalBlocker(self.slicer_executable_auto), QSignalBlocker(self.slicer_executable_custom):
+            self.slicer_executable_auto.setChecked(not bool(path))
+            self.slicer_executable_custom.setChecked(bool(path))
+        self.slicer_custom_controls.setVisible(bool(path))
+        if not path:
+            self.slicer_executable_status.setText('automatic executable detection · ' + selected)
+            self.slicer_executable_status.setStyleSheet('color: #aebfca;')
+            tooltip = f'{selected}: automatic executable detection.'
+        elif not Path(path).is_file():
+            self.slicer_executable_status.setText('Missing custom executable · ' + path)
+            self.slicer_executable_status.setStyleSheet('color: #f1b66d;')
+            tooltip = f'Saved executable not found: {path}. Choose a new file or select Automatic.'
+        else:
+            self.slicer_executable_status.setText('Custom executable · ' + path)
+            self.slicer_executable_status.setStyleSheet('color: #b8c9d6;')
+            tooltip = path
+        self.slicer_executable_status.setToolTip(tooltip)
     def _browse_slicer_executable(self):
         selected = self.output_application.currentData() or "Bambu Studio"
         path, _ = QFileDialog.getOpenFileName(
@@ -1167,6 +1444,8 @@ class MainWindow(QMainWindow):
                 self.filaments_panel, 'selection_is_valid', True)
         self.compose_button.setEnabled(ready and not busy and self._forecast_task is None)
         self.export_cancel_button.setEnabled(busy and self._export_task.isRunning())
+        self.export_cancel_button.setVisible(busy)
+        self.export_action_stack.setCurrentIndex(1 if busy else 0)
         self.open_export_button.setEnabled(not busy and bool(self._export_result))
         self.export_folder_button.setEnabled(not busy and bool(self._export_result))
 
@@ -2328,8 +2607,10 @@ class MainWindow(QMainWindow):
         self._export_task = worker
         self.export_progress.setRange(0, 100)
         self.export_progress.setValue(0)
-        self.export_progress.show()
+        self.export_action_stack.setCurrentWidget(self.export_progress)
         self.export_status.setText('Preparing native 3MF export…')
+        self.export_status.show()
+        self.export_status.show()
         self._refresh_export_availability()
         self.results_panel.record_event('Native 3MF export',
             f'Export requested for {Path(request.plan.model).name}', 'busy')
@@ -2363,6 +2644,7 @@ class MainWindow(QMainWindow):
             cancelled = isinstance(error, InterruptedError)
             title = 'Export cancelled' if cancelled else 'Export failed'
             self.export_status.setText(title + ': ' + str(error))
+            self.export_status.setVisible(not cancelled)
             self.results_panel.record_event('Native 3MF export', str(error),
                                             'warning' if cancelled else 'error')
             if not cancelled:
@@ -2373,6 +2655,7 @@ class MainWindow(QMainWindow):
         self._completed_export_success = True
         self.export_progress.setValue(100)
         self.export_status.setText('Validated 3MF saved: ' + Path(result['output']).name)
+        self.export_status.hide()
         self.results_panel.record_event('Native 3MF export',
             'Validated: ' + Path(result['output']).name, 'success')
         self._refresh_results_context()
@@ -2394,7 +2677,7 @@ class MainWindow(QMainWindow):
         self.reference_button.setEnabled(True)
         self.export_directory_browse.setEnabled(True)
         self.forecast_refresh.setEnabled(bool(self.state.model_path) and self._filament_decision().ready)
-        self.export_progress.setVisible(False)
+        self.export_action_stack.setCurrentWidget(self.compose_button)
         worker.deleteLater()
         self._refresh_export_availability()
         if should_open:

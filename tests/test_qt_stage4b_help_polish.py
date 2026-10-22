@@ -38,9 +38,12 @@ class HelpPolishContractTests(unittest.TestCase):
         self.assertNotIn("SectionHelpButton('optimization_details')",main)
         self.assertNotIn('help_heading(',results)
         self.assertNotIn('SectionHelpButton(',results)
-        self.assertIn("_text('CURRENT SESSION', 'sectionTitle')",results)
-        self.assertIn("_text('CURRENT ACTIVITY', 'sectionTitle')",results)
-        self.assertIn("_text('EXISTING / GENERATED REPORT', 'sectionTitle')",results)
+        # Stage 5: a status strip replaces Current Session; Activity and
+        # Report use one diagnostics viewer without duplicate headings.
+        self.assertIn("self.export_settings_mount.setObjectName('exportSettingsMount')",results)
+        self.assertIn("_text('DIAGNOSTICS', 'sectionTitle')",results)
+        self.assertIn('exportSessionToggle',results)
+        self.assertNotIn("_text('CURRENT ACTIVITY', 'sectionTitle')",results)
 
     def test_custom_library_links_are_actual_repo_examples(self):
         source=(UI/'section_help.py').read_text(encoding='utf-8')

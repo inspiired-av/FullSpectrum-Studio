@@ -18,16 +18,19 @@ class EncodingAndStageLabelTests(unittest.TestCase):
                                 and k.value.value == 'utf-8' for k in node.keywords),
                             f'Implicit locale encoding in read_text() at line {node.lineno}')
 
-    def test_stage_3c_label_tracks_installed_features(self):
+    def test_header_displays_release_version_without_prototype_badge(self):
         path = Path(__file__).resolve().parents[1] / 'desktop/qt_app/main_window.py'
         content = path.read_text(encoding='utf-8')
-        # Lettered subphases (4D-A, 4D-B, etc.) are real stage labels.
-        match = re.search(r'UI prototype · Stage (\d+)([A-Z](?:-[A-Z]\d*)?)', content)
-        self.assertIsNotNone(match, 'Missing Qt development-stage badge')
-        stage = (int(match.group(1)), match.group(2))
-        self.assertGreaterEqual(stage, (3, 'C'))
-        self.assertIn(f'Qt Stage {match.group(1)}{match.group(2)} —', content)
-        self.assertNotIn('UI prototype · Stage 3B', content)
+        main = next(node for node in ast.parse(content).body
+                    if isinstance(node, ast.ClassDef) and node.name == 'MainWindow')
+        build = next(node for node in main.body
+                     if isinstance(node, ast.FunctionDef) and node.name == '_build')
+        header = ast.get_source_segment(content, build)
+        # Stage 5 intentionally removed the development-stage badge. Retain
+        # the release version and existing Open Model entry point instead.
+        self.assertNotIn('UI prototype · Stage', header)
+        self.assertIn('h.addWidget(_label("v" + APP_VERSION, "bodyMuted"))', header)
+        self.assertIn('self.open_button = QPushButton("Open Model")', header)
 
 
 if __name__ == '__main__':

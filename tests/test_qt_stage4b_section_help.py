@@ -47,8 +47,11 @@ class ContextualHelpContractTests(unittest.TestCase):
             self.assertNotIn(f'SectionHelpButton("{name}")', main)
         self.assertIn("SectionHelpButton('advanced_settings')", main)
         self.assertIn("SectionHelpButton('preview_modes')", main)
-        for name in ('live_forecast','expected_palette','color_optimization','native_project_template'):
+        for name in ('live_forecast','expected_palette','color_optimization'):
             self.assertIn(f'help_heading("{name}"', main)
+        # The compact native-template heading uses single quotes but keeps
+        # the identical contextual-help widget and topic.
+        self.assertIn("help_heading('native_project_template'", main)
         for name in ('filament_source', 'filament_colors', 'protect_solid_colors'):
             self.assertIn(f"help_heading('{name}'", tab)
         self.assertNotIn('help_heading(', results)
