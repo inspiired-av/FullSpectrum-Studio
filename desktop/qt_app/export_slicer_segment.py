@@ -7,7 +7,7 @@ at the seam or cause two separate hover backgrounds.
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QRectF, Qt
-from PySide6.QtGui import QColor, QCursor, QPainter
+from PySide6.QtGui import QColor, QCursor, QPainter, QFont, QFontMetrics
 from PySide6.QtWidgets import QFrame
 
 
@@ -25,6 +25,9 @@ class ExportSlicerSegment(QFrame):
         self._tracked_buttons.append(button)
         button.installEventFilter(self)
         button.setMouseTracking(True)
+        # Child buttons have Ignored horizontal size policies and stretch=1.
+        # Never derive a *minimum* for the whole widget from unscaled font
+        # metrics: that previously overrode the 268px maximum (356px on Win).
 
     def set_selected(self, index):
         index = 1 if int(index) else 0
@@ -75,4 +78,28 @@ class ExportSlicerSegment(QFrame):
         selected = QRectF(left, bounds.top(), half, bounds.height())
         painter.setBrush(self.selected_color)
         painter.drawRoundedRect(selected, radius, radius)
+        # Paint BOTH labels in the same coordinate system as the pill halves.
+        # Native QPushButtons stay in front as transparent, accessible click
+        # targets; neither platform-specific label padding nor size hints
+        # can shift the visible text across the central seam.
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        for index, button in enumerate(self._tracked_buttons):
+            label_rect = QRectF(
+                bounds.left() + index * half, bounds.top(), half, bounds.height()
+            )
+            font = button.font()
+            if index == self._selected_index:
+                font.setWeight(QFont.Weight.DemiBold)
+            # Fit the label to its painted half without enlarging the pill.
+            # High-DPI or font-substitution environments may need a slightly
+            # smaller font, but the two click targets stay exactly equal.
+            available = max(1, int(label_rect.width()) - 12)
+            metrics = QFontMetrics(font)
+            while metrics.horizontalAdvance(button.text()) > available and font.pointSizeF() > 7.0:
+                font.setPointSizeF(max(7.0, font.pointSizeF() - 0.5))
+                metrics = QFontMetrics(font)
+            label = metrics.elidedText(button.text(), Qt.TextElideMode.ElideRight, available)
+            painter.setFont(font)
+            painter.setPen(QColor('#ffffff' if index == self._selected_index else '#e1e4e9'))
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)
         painter.end()

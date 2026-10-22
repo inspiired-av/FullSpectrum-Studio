@@ -414,6 +414,9 @@ class MainWindow(QMainWindow):
         self.custom_library_browse.clicked.connect(self._browse_custom_library)
         # Export widgets must exist before _plan_tab restores and wires preferences.
         self.export_settings_panel = self._build_export_settings()
+        # Start compact before Qt evaluates minimum size hints: the legacy
+        # two-column Export grid must not raise the sidebar's own minimum.
+        self._arrange_export_grid(True)
         self.export_action_panel = self._build_export_actions()
         self.tabs.addTab(self._plan_tab(), "Plan")
         self.tabs.addTab(self.filaments_panel, "Filaments")
@@ -426,6 +429,8 @@ class MainWindow(QMainWindow):
         self.results_panel.open_export_requested.connect(self._open_export_in_slicer)
         self.results_panel.show_export_folder_requested.connect(self._show_export_folder)
         self.results_panel.attach_export_panels(self.export_settings_panel, self.export_action_panel)
+        self.results_panel.export_viewport_resized.connect(self._update_export_layout)
+        QTimer.singleShot(0, self._update_export_layout)
         # Single source of truth for validated output actions, on the Export tab.
         self.open_export_button = self.results_panel.open_export_button
         self.export_folder_button = self.results_panel.export_folder_button
@@ -488,6 +493,11 @@ class MainWindow(QMainWindow):
         """Stage 5 v3: compact two-column setup, independent details disclosures."""
         panel = QWidget()
         panel.setObjectName('exportSettingsPanel')
+        # QScrollArea must be allowed to size the compact form to its viewport.
+        # Preferred size hints from the previous two-column grid must not force
+        # the whole page wider than the narrow sidebar.
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         col = _column(panel, margins=(0, 0, 0, 0), spacing=9)
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -499,6 +509,8 @@ class MainWindow(QMainWindow):
         # First row: matching filename/directory pickers. Keep full paths in
         # tooltips; Qt's line edit handles ellipsis/scroll without truncation.
         template_box = QWidget()
+        template_box.setMinimumWidth(0)
+        template_box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         template_col = _column(template_box, margins=(0, 0, 0, 0), spacing=5)
         template_title = QHBoxLayout()
         template_title.setContentsMargins(0, 0, 0, 0)
@@ -515,6 +527,7 @@ class MainWindow(QMainWindow):
         self.template_path.setObjectName('nativeTemplatePath')
         self.template_path.setReadOnly(True)
         self.template_path.setMinimumWidth(0)
+        self.template_path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.template_path.setMinimumHeight(34)
         self.template_path.setPlaceholderText('Choose a 3MF template…')
         template_row.addWidget(self.template_path, 1)
@@ -530,6 +543,8 @@ class MainWindow(QMainWindow):
         grid.addWidget(template_box, 0, 0)
 
         directory_box = QWidget()
+        directory_box.setMinimumWidth(0)
+        directory_box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         directory_col = _column(directory_box, margins=(0, 0, 0, 0), spacing=5)
         directory_title = QHBoxLayout()
         directory_title.setContentsMargins(0, 0, 0, 0)
@@ -543,6 +558,7 @@ class MainWindow(QMainWindow):
         self.export_directory.setObjectName('exportOutputDirectory')
         self.export_directory.setReadOnly(True)
         self.export_directory.setMinimumWidth(0)
+        self.export_directory.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.export_directory.setMinimumHeight(34)
         self.export_directory.setPlaceholderText('Model folder (default)')
         self.export_directory.setToolTip('Defaults to the source model folder. Choose another folder for this session.')
@@ -591,6 +607,8 @@ class MainWindow(QMainWindow):
 
         # Slicer controls and Advanced share one baseline across columns.
         slicer_box = QWidget()
+        slicer_box.setMinimumWidth(0)
+        slicer_box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         slicer_col = _column(slicer_box, margins=(0, 0, 0, 0), spacing=5)
         slicer_heading = _label('OUTPUT SLICER', 'sectionTitle')
         slicer_heading.setFixedHeight(20)
@@ -601,6 +619,7 @@ class MainWindow(QMainWindow):
         self.slicer_segment = ExportSlicerSegment()
         self.slicer_segment.setObjectName('exportSlicerSegment')
         self.slicer_segment.setMaximumWidth(268)
+        self.slicer_segment.setMinimumWidth(240)
         self.slicer_segment.setMinimumHeight(36)
         self.slicer_segment.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
@@ -613,17 +632,21 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             button.setAutoExclusive(True)
             button.setObjectName('slicerChoiceOrca' if value == 'OrcaSlicer' else 'slicerChoiceBambu')
-            button.setToolTip('Open validated exports in ' + title)
-            # The enclosing canvas draws the single continuous background,
-            # active pill and whole-container hover. Buttons provide hit targets
-            # and keyboard navigation only; their hover must remain transparent.
+            button.setToolTip('Use ' + title + ' for exported projects')
+            button.setAccessibleName(title)
+            # Parent draws selected background and centered labels together.
+            # Transparent QPushButtons remain the real interactive targets,
+            # preserving click, keyboard, and saved-preference behavior.
             button.setStyleSheet(
-                'QPushButton { background: transparent; color: #e1e4e9; border: none; '
+                'QPushButton { background: transparent; color: transparent; border: none; '
                 'border-radius: 0; padding: 5px 7px; }'
                 'QPushButton:hover { background: transparent; }'
                 'QPushButton:pressed { background: transparent; }'
-                'QPushButton:checked { background: transparent; color: white; font-weight: 600; }')
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                'QPushButton:checked { background: transparent; color: transparent; font-weight: 600; }')
+            # Ignore each button's unequal native text size hint. Stretch=1
+            # on the QHBoxLayout then gives exactly half to each click target.
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            button.setMinimumWidth(0)
             button.setMinimumHeight(36)
             button.clicked.connect(
                 lambda _checked=False, v=value: self._set_combo_value(self.output_application, v))
@@ -636,6 +659,8 @@ class MainWindow(QMainWindow):
         grid.addWidget(slicer_box, 3, 0, Qt.AlignmentFlag.AlignTop)
 
         options_box = QWidget()
+        options_box.setMinimumWidth(0)
+        options_box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         options_col = _column(options_box, margins=(0, 0, 0, 0), spacing=5)
         options_heading = _label('AFTER EXPORTING', 'sectionTitle')
         options_heading.setFixedHeight(20)
@@ -659,6 +684,12 @@ class MainWindow(QMainWindow):
         options_row.addWidget(self.export_advanced_toggle)
         options_col.addLayout(options_row)
         grid.addWidget(options_box, 3, 1, Qt.AlignmentFlag.AlignTop)
+        self._export_settings_grid = grid
+        self._export_grid_sections = (
+            template_box, directory_box, self.template_attention,
+            self.template_warning_panel, slicer_box, options_box,
+        )
+        self._export_grid_compact = None
         col.addLayout(grid)
 
         # Only slicer-launch configuration belongs under Advanced. The mode
@@ -673,18 +704,20 @@ class MainWindow(QMainWindow):
         advanced_col.addWidget(_label('SLICER LAUNCH', 'sectionTitle'))
         self.slicer_executable_row = QWidget()
         executable_col = _column(self.slicer_executable_row, margins=(0, 0, 0, 0), spacing=7)
-        launch_modes = QHBoxLayout()
+        launch_modes = QGridLayout()
         launch_modes.setContentsMargins(0, 0, 0, 0)
-        launch_modes.setSpacing(16)
+        launch_modes.setHorizontalSpacing(16)
+        launch_modes.setVerticalSpacing(4)
+        self._export_launch_modes = launch_modes
         self.slicer_executable_auto = QRadioButton('Automatic detection')
         self.slicer_executable_auto.setObjectName('slicerExecutableAuto')
         self.slicer_executable_auto.setToolTip('Find the installed executable for the selected slicer.')
         self.slicer_executable_custom = QRadioButton('Custom executable')
         self.slicer_executable_custom.setObjectName('slicerExecutableCustom')
         self.slicer_executable_custom.setToolTip('Use a portable, nightly, or manually installed slicer.')
-        launch_modes.addWidget(self.slicer_executable_auto)
-        launch_modes.addWidget(self.slicer_executable_custom)
-        launch_modes.addStretch(1)
+        launch_modes.addWidget(self.slicer_executable_auto, 0, 0)
+        launch_modes.addWidget(self.slicer_executable_custom, 0, 1)
+        launch_modes.setColumnStretch(2, 1)
         executable_col.addLayout(launch_modes)
         self.slicer_custom_controls = QWidget()
         custom_row = QHBoxLayout(self.slicer_custom_controls)
@@ -715,26 +748,100 @@ class MainWindow(QMainWindow):
         # Save/Revert is contextual, not an advanced executable preference.
         # The row is absent entirely until any PlanPreferences value is dirty.
         self.export_preferences_row = QWidget()
-        preference_buttons = QHBoxLayout(self.export_preferences_row)
+        self.export_preferences_row.setMinimumWidth(0)
+        self.export_preferences_row.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        preference_buttons = QVBoxLayout(self.export_preferences_row)
         preference_buttons.setContentsMargins(0, 0, 0, 0)
-        preference_buttons.setSpacing(7)
-        preference_buttons.addWidget(_label('UNSAVED SETTINGS', 'sectionTitle'))
-        preference_buttons.addStretch(1)
+        preference_buttons.setSpacing(4)
+        self.export_preferences_caption = _label('UNSAVED SETTINGS', 'sectionTitle')
+        preference_buttons.addWidget(self.export_preferences_caption)
+        preference_actions = QHBoxLayout()
+        preference_actions.setContentsMargins(0, 0, 0, 0)
+        preference_actions.setSpacing(7)
+        preference_actions.addStretch(1)
         self.export_save_settings_button = QPushButton('Save Settings')
         self.export_save_settings_button.setIcon(export_icon('save'))
         self.export_save_settings_button.setMinimumHeight(34)
         self.export_save_settings_button.setObjectName('exportSaveSettings')
         self.export_save_settings_button.clicked.connect(self._save_plan_settings)
-        preference_buttons.addWidget(self.export_save_settings_button)
+        self.export_save_settings_button.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        preference_actions.addWidget(self.export_save_settings_button)
         self.export_revert_settings_button = QPushButton('Revert')
         self.export_revert_settings_button.setIcon(export_icon('reset'))
         self.export_revert_settings_button.setMinimumHeight(34)
         self.export_revert_settings_button.setObjectName('exportRevertSettings')
         self.export_revert_settings_button.clicked.connect(self._revert_plan_settings)
-        preference_buttons.addWidget(self.export_revert_settings_button)
+        self.export_revert_settings_button.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        preference_actions.addWidget(self.export_revert_settings_button)
+        preference_buttons.addLayout(preference_actions)
         self.export_preferences_row.hide()
         col.addWidget(self.export_preferences_row)
         return panel
+
+    def _arrange_export_grid(self, compact):
+        """Move existing widgets without reconstructing controls or preferences."""
+        compact = bool(compact)
+        if self._export_grid_compact is compact:
+            return
+        grid = self._export_settings_grid
+        grid.setHorizontalSpacing(0 if compact else 12)
+        template, directory, warning_toggle, warning, slicer, after = self._export_grid_sections
+        for widget in self._export_grid_sections:
+            grid.removeWidget(widget)
+        if compact:
+            # Narrow sidebar: no two-column minimum size hint can crop fields.
+            for row, widget in enumerate((template, warning_toggle, warning,
+                                          directory, slicer, after)):
+                alignment = (Qt.AlignmentFlag.AlignLeft if widget is warning_toggle
+                             else Qt.AlignmentFlag.AlignTop if widget in (slicer, after)
+                             else Qt.AlignmentFlag(0))
+                grid.addWidget(widget, row, 0, alignment)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 0)
+        else:
+            grid.addWidget(template, 0, 0)
+            grid.addWidget(directory, 0, 1)
+            grid.addWidget(warning_toggle, 1, 0, 1, 2, Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(warning, 2, 0, 1, 2)
+            grid.addWidget(slicer, 3, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(after, 3, 1, Qt.AlignmentFlag.AlignTop)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+        # Slicer launch modes must also wrap when Advanced is expanded.
+        radios = self._export_launch_modes
+        radios.removeWidget(self.slicer_executable_auto)
+        radios.removeWidget(self.slicer_executable_custom)
+        radios.addWidget(self.slicer_executable_auto, 0, 0)
+        radios.addWidget(self.slicer_executable_custom, 1 if compact else 0,
+                         0 if compact else 1)
+        # Remove only the unsaved-settings caption in narrow view; the actual
+        # Save/Revert buttons stay accessible on the same row.
+        self.export_preferences_caption.setVisible(not compact)
+        self._export_grid_compact = compact
+        grid.invalidate()
+        self.export_settings_panel.updateGeometry()
+
+    def _update_export_layout(self, viewport_width=None):
+        """Qt viewport width determines whether Export is one or two columns."""
+        if not hasattr(self, 'results_panel'):
+            return
+        if not isinstance(viewport_width, int):
+            viewport_width = self.results_panel.content_scroll.viewport().width()
+        # The scroll-page has 12px margins on both sides. A roomy breakpoint
+        # prevents two-column size hints from exceeding available width.
+        available = viewport_width - 24
+        # Hysteresis prevents two-column minimum hints and a transient
+        # scrollbar from oscillating around a single breakpoint.
+        limit = 690 if self._export_grid_compact else 650
+        compact = available < limit
+        if compact != self._export_grid_compact:
+            # Diagnostics is now inside a normal QVBoxLayout header; it follows
+            # Export geometry automatically. Do not call the removed overlay API.
+            self._arrange_export_grid(compact)
+
     def _toggle_template_warning(self, checked):
         """Only this disclosure controls template information, not Advanced."""
         self.template_warning_panel.setVisible(bool(checked))

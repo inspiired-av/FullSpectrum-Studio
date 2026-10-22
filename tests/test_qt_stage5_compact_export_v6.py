@@ -36,11 +36,10 @@ class V6Contracts(unittest.TestCase):
         self.assertIn('col.addSpacing(8)',self.main)
 
     def test_diagnostics_centered_against_visible_viewport(self):
-        self.assertIn('self.diagnostics_mode_group = QWidget(self)',self.results)
-        self.assertIn('(self.width() - group.width()) // 2',self.results)
-        self.assertIn('header.mapTo(self, QPoint(0, 0))',self.results)
-        self.assertIn('self.diagnostics_header.installEventFilter(self)',self.results)
-        self.assertIn('self._center_diagnostics_switch()',self.results)
+        self.assertIn('self.diagnostics_mode_group = QWidget(self.diagnostics_header)',self.results)
+        self.assertIn('diagnostics_head.addWidget(',self.results)
+        self.assertIn('self.diagnostics_mode_group, 0, Qt.AlignmentFlag.AlignHCenter',self.results)
+        self.assertNotIn('group.move(x, y)',self.results)
 
     def test_zoom_clip_planes_are_bounded(self):
         t=ast.parse(self.viewport)
@@ -92,7 +91,9 @@ class V6QtTests(unittest.TestCase):
                 tab._select_diagnostics(name)
                 self.app.processEvents()
                 center=tab.diagnostics_mode_group.mapTo(tab,tab.diagnostics_mode_group.rect().center()).x()
-                self.assertLess(abs(center-tab.width()/2),30,(width,name,center,tab.width()))
+                header=tab.diagnostics_header
+                header_center=header.mapTo(tab,header.rect().center()).x()
+                self.assertLess(abs(center-header_center),5,(width,name,center,header_center))
                 self.assertTrue(tab.diagnostics_mode_group.isVisibleTo(w))
 
 if __name__=='__main__': unittest.main()

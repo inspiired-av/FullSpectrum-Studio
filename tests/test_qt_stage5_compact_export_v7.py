@@ -42,11 +42,10 @@ class V7Contracts(unittest.TestCase):
         self.assertIn("_label('OUTPUT DIRECTORY', 'sectionTitle')",self.main)
 
     def test_diagnostics_centered_in_tab_coordinates(self):
-        self.assertIn('self.diagnostics_mode_group = QWidget(self)',self.results)
-        self.assertIn('x = (self.width() - group.width()) // 2',self.results)
-        self.assertIn('group.move(x, y)',self.results)
-        self.assertIn('valueChanged.connect(',self.results)
-        self.assertIn('self.installEventFilter(self)',self.results)
+        self.assertIn('self.diagnostics_mode_group = QWidget(self.diagnostics_header)',self.results)
+        self.assertIn('diagnostics_head.addWidget(',self.results)
+        self.assertIn('self.diagnostics_mode_group, 0, Qt.AlignmentFlag.AlignHCenter',self.results)
+        self.assertNotIn('group.move(x, y)',self.results)
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6') is not None, 'PySide6 not installed')
 class V7QtTests(unittest.TestCase):
@@ -92,7 +91,10 @@ class V7QtTests(unittest.TestCase):
         self.app.processEvents()
         slicer_top=slicer.mapTo(w.results_panel,slicer.rect().topLeft()).y()
         auto_top=auto.mapTo(w.results_panel,auto.rect().topLeft()).y()
-        self.assertLessEqual(abs(slicer_top-auto_top),4,(slicer_top,auto_top))
+        if w._export_grid_compact:
+            self.assertGreater(auto_top,slicer_top)
+        else:
+            self.assertLessEqual(abs(slicer_top-auto_top),4,(slicer_top,auto_top))
 
     def test_diagnostics_switch_center_at_various_sizes(self):
         w=self.make_window()
@@ -105,7 +107,9 @@ class V7QtTests(unittest.TestCase):
                 self.app.processEvents()
                 group=tab.diagnostics_mode_group
                 center=group.mapTo(tab,group.rect().center()).x()
-                self.assertLess(abs(center-tab.width()/2),5,(width,mode,center,tab.width()))
+                header=tab.diagnostics_header
+                header_center=header.mapTo(tab,header.rect().center()).x()
+                self.assertLess(abs(center-header_center),5,(width,mode,center,header_center))
                 self.assertTrue(group.isVisibleTo(w))
 
 if __name__ == '__main__':

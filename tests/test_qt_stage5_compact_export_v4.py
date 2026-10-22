@@ -107,7 +107,11 @@ class Stage5V4QtTests(unittest.TestCase):
         adv = w.export_advanced_toggle
         first = seg.mapTo(w, seg.rect().center()).y()
         second = adv.mapTo(w, adv.rect().center()).y()
-        self.assertLess(abs(first-second), 10)
+        # Wide Export keeps the controls on one row; narrow stacks them.
+        if w._export_grid_compact:
+            self.assertGreater(abs(first-second), 10)
+        else:
+            self.assertLess(abs(first-second), 10)
         self.assertEqual(w.slicer_segment.selected_color.name(), '#2183f5')
         w.slicer_choice_buttons['OrcaSlicer'].click()
         self.assertEqual(w.output_application.currentData(), 'OrcaSlicer')

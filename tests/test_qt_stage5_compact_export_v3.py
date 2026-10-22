@@ -58,9 +58,11 @@ class Stage5V3Contracts(unittest.TestCase):
         self.assertIn('exportFileIcon',src)
         self.assertIn("export_icon('file', '#89d9c3')",src)
         self.assertIn('self.export_summary_row.show()',src)
-        self.assertIn('self.diagnostics_mode_group = QWidget(self)',src)
-        self.assertIn('def _center_diagnostics_switch(self):',src)
-        self.assertIn('(self.width() - group.width()) // 2',src)
+        # The selector is a normal second header row, not a floating overlay.
+        self.assertIn('self.diagnostics_mode_group = QWidget(self.diagnostics_header)',src)
+        self.assertIn('diagnostics_head.addWidget(',src)
+        self.assertIn('self.diagnostics_mode_group, 0, Qt.AlignmentFlag.AlignHCenter',src)
+        self.assertNotIn('def _center_diagnostics_switch(self):',src)
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'PySide6 unavailable')
 class Stage5V3QtTests(unittest.TestCase):

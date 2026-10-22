@@ -43,6 +43,13 @@ class SlicerPillContracts(unittest.TestCase):
             self.assertIn(phrase,self.main)
         self.assertEqual(self.main.count('    def _sync_slicer_choice_buttons('),1)
 
+    def test_labels_are_centered_by_one_painter(self):
+        self.assertNotIn('self.setMinimumWidth(2 * half)', self.pill)
+        self.assertIn('painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)', self.pill)
+        self.assertIn('button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)', self.main)
+        self.assertIn('button.setAccessibleName(title)', self.main)
+        self.assertIn('color: transparent; font-weight: 600;', self.main)
+
     def test_removed_legacy_assertions(self):
         help_text=(ROOT/'tests/test_qt_stage4b_help_polish.py').read_text(encoding='utf-8-sig')
         export_text=(ROOT/'tests/test_qt_stage4dc_export_workspace.py').read_text(encoding='utf-8-sig')
@@ -93,6 +100,19 @@ class SlicerPillQtTests(unittest.TestCase):
         self.assertNotEqual(left,'#2183f5')
         self.assertEqual(right,'#2183f5')
         self.assertEqual(window.output_application.currentData(),'Bambu Studio')
+
+    def test_equal_hit_areas_and_room_for_longest_label(self):
+        window = self.create_window()
+        segment = window.slicer_segment
+        self.app.processEvents()
+        buttons = list(window.slicer_choice_buttons.values())
+        self.assertEqual(len(buttons), 2)
+        self.assertLessEqual(abs(buttons[0].width() - buttons[1].width()), 1)
+        self.assertGreaterEqual(segment.width(), 240)
+        self.assertLessEqual(segment.width(), 268)
+        for button in buttons:
+            self.assertGreaterEqual(button.width(), segment.width() // 2 - 1)
+            self.assertEqual(button.accessibleName(), button.text())
 
     def test_container_hover_is_single_uniform_paint(self):
         window=self.create_window()

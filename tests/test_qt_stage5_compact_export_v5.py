@@ -54,10 +54,16 @@ class V5Contracts(unittest.TestCase):
 
     def test_diagnostics_are_centered_and_responsive(self):
         self.assertIn('self.diagnostics_header = QWidget()', self.results)
-        self.assertIn('def _center_diagnostics_switch(self):', self.results)
-        self.assertIn('group.move(x, y)', self.results)
+        self.assertIn('self.diagnostics_mode_group = QWidget(self.diagnostics_header)', self.results)
+        self.assertIn('diagnostics_head.addWidget(', self.results)
         self.assertIn('self.content_scroll.viewport().installEventFilter(self)', self.results)
-        self.assertIn("event.type() == QEvent.Type.Resize", self.results)
+        # The movement-aware filter caches event.type() in `kind` so
+        # Resize and LayoutRequest can both trigger a queued recenter.
+        self.assertIn('and event.type() == QEvent.Type.Resize', self.results)
+        # The compact-header implementation removed the overlay recenter API.
+        # No responsive layout callback may invoke that deleted method.
+        self.assertNotIn('_queue_diagnostics_recenter', self.main)
+        self.assertIn('QEvent.Type.Resize', self.results)
         self.assertIn('min(440, int(viewport_height * 0.48))', self.results)
         self.assertNotIn('setMaximumHeight(200)', self.results)
 

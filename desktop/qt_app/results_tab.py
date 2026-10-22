@@ -4,10 +4,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QEvent, QPoint
+from PySide6.QtCore import Qt, Signal, QEvent, QPoint, QTimer
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget, QToolButton, QStackedWidget, QGridLayout,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QVBoxLayout, QWidget, QToolButton, QStackedWidget, QGridLayout, QSizePolicy,
 )
 
 from desktop.qt_app.results_state import event_tail, model_summary, read_existing_report, shorten
@@ -25,6 +25,7 @@ def _text(value, kind=None):
 class ResultsTab(QWidget):
     open_export_requested = Signal()
     show_export_folder_requested = Signal()
+    export_viewport_resized = Signal(int)
     """Validated 3MF exports, progress, reports and current-session activity."""
 
     def __init__(self, parent=None):
@@ -44,9 +45,13 @@ class ResultsTab(QWidget):
         self.content_scroll.setObjectName('resultsScroll')
         self.content_scroll.setWidgetResizable(True)
         self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Responsive layouts should not silently crop controls if an unusual
+        # font/DPI combination still exceeds the sidebar's minimum width.
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         outer.addWidget(self.content_scroll)
         page = QWidget()
+        page.setMinimumWidth(0)
+        page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.content_scroll.setWidget(page)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 13, 12, 12)
@@ -117,6 +122,9 @@ class ResultsTab(QWidget):
 
         self.export_settings_mount = QWidget()
         self.export_settings_mount.setObjectName('exportSettingsMount')
+        self.export_settings_mount.setMinimumWidth(0)
+        self.export_settings_mount.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.export_settings_layout = QVBoxLayout(self.export_settings_mount)
         self.export_settings_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.export_settings_mount)
@@ -124,6 +132,9 @@ class ResultsTab(QWidget):
         # Keep export as the sole full-width primary action.
         self.export_actions_mount = QWidget()
         self.export_actions_mount.setObjectName('exportActionsMount')
+        self.export_actions_mount.setMinimumWidth(0)
+        self.export_actions_mount.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.export_actions_layout = QVBoxLayout(self.export_actions_mount)
         self.export_actions_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.export_actions_mount)
@@ -154,17 +165,19 @@ class ResultsTab(QWidget):
         # oversized scroll-page layout (which shifts it at narrow widths).
         self.diagnostics_header = QWidget()
         self.diagnostics_header.setObjectName('exportDiagnosticsHeader')
-        self.diagnostics_header.setMinimumHeight(38)
-        diagnostics_head = QHBoxLayout(self.diagnostics_header)
+        diagnostics_head = QVBoxLayout(self.diagnostics_header)
         diagnostics_head.setContentsMargins(0, 0, 0, 0)
-        diagnostics_head.setSpacing(6)
+        diagnostics_head.setSpacing(3)
+        diagnostics_top = QHBoxLayout()
+        diagnostics_top.setContentsMargins(0, 0, 0, 0)
+        diagnostics_top.setSpacing(6)
         diagnostics_left = QWidget()
         diagnostics_left_row = QHBoxLayout(diagnostics_left)
         diagnostics_left_row.setContentsMargins(0, 0, 0, 0)
         diagnostics_left_row.addWidget(_text('DIAGNOSTICS', 'sectionTitle'))
-        diagnostics_head.addWidget(diagnostics_left)
-        diagnostics_head.addStretch(1)
-        self.diagnostics_mode_group = QWidget(self)
+        diagnostics_top.addWidget(diagnostics_left)
+        diagnostics_top.addStretch(1)
+        self.diagnostics_mode_group = QWidget(self.diagnostics_header)
         diagnostic_choices = QHBoxLayout(self.diagnostics_mode_group)
         diagnostic_choices.setContentsMargins(0, 0, 0, 0)
         diagnostic_choices.setSpacing(4)
@@ -195,7 +208,6 @@ class ResultsTab(QWidget):
                 'border-color: #69b7cc; font-weight: 600; }'
             )
         self.diagnostics_mode_group.adjustSize()
-        self.diagnostics_mode_group.raise_()
         self.diagnostics_tools = QWidget()
         diagnostic_actions = QHBoxLayout(self.diagnostics_tools)
         diagnostic_actions.setContentsMargins(0, 0, 0, 0)
@@ -238,12 +250,11 @@ class ResultsTab(QWidget):
         self.diagnostics_collapse.setCheckable(True)
         self.diagnostics_collapse.setChecked(True)
         diagnostic_actions.addWidget(self.diagnostics_collapse)
-        diagnostics_head.addWidget(self.diagnostics_tools)
+        diagnostics_top.addWidget(self.diagnostics_tools)
+        diagnostics_head.addLayout(diagnostics_top)
+        diagnostics_head.addWidget(
+            self.diagnostics_mode_group, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(self.diagnostics_header)
-        self.diagnostics_header.installEventFilter(self)
-        self.content_scroll.verticalScrollBar().valueChanged.connect(
-            lambda _value: self._center_diagnostics_switch())
-        self.installEventFilter(self)
 
         self.activity_label = _text('Ready', 'helpText')
         self.activity_label.hide()  # Status belongs to session state, not a separate row.
@@ -285,47 +296,23 @@ class ResultsTab(QWidget):
         # Resize with the Export viewport instead of imposing a tiny maximum.
         self.content_scroll.viewport().installEventFilter(self)
         self._fit_diagnostics_height()
-        self._center_diagnostics_switch()
         layout.addStretch(1)
-
-    def _center_diagnostics_switch(self):
-        """Overlay the diagnostics switch at the exact ResultsTab horizontal center.
-
-        Parenting the switch to ResultsTab removes the scroll-content width
-        dependency. Its y position tracks the real diagnostics header even when
-        scrolling. Hide it when that header scrolls out of view.
-        """
-        if not hasattr(self, 'diagnostics_mode_group'):
-            return
-        group = self.diagnostics_mode_group
-        header = self.diagnostics_header
-        viewport = self.content_scroll.viewport()
-        group.adjustSize()
-        x = (self.width() - group.width()) // 2
-        header_in_tab = header.mapTo(self, QPoint(0, 0))
-        y = header_in_tab.y() + (header.height() - group.height()) // 2
-        # Keep the selector truly centered; title and tools remain in the
-        # underlying header layout and do not participate in positioning.
-        group.move(x, y)
-        in_view = header.mapTo(viewport, QPoint(0, 0)).y()
-        visible = (header.isVisible() and in_view + header.height() > 0
-                   and in_view < viewport.height())
-        group.setVisible(visible)
-        if visible:
-            group.raise_()
 
     def _fit_diagnostics_height(self):
         viewport_height = self.content_scroll.viewport().height()
         target = max(190, min(440, int(viewport_height * 0.48)))
         self.diagnostics_stack.setFixedHeight(target)
 
+    def _notify_export_viewport_width(self):
+        self.export_viewport_resized.emit(self.content_scroll.viewport().width())
+
     def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.Resize:
-            if watched is self.content_scroll.viewport() and hasattr(self, 'diagnostics_stack'):
-                self._fit_diagnostics_height()
-                self._center_diagnostics_switch()
-            elif watched is self.diagnostics_header or watched is self:
-                self._center_diagnostics_switch()
+        if (watched is self.content_scroll.viewport()
+                and event.type() == QEvent.Type.Resize
+                and hasattr(self, 'diagnostics_stack')):
+            self._fit_diagnostics_height()
+            # Emit after layout settles to avoid reentrant grid reflow.
+            QTimer.singleShot(0, self._notify_export_viewport_width)
         return super().eventFilter(watched, event)
 
     def _select_diagnostics(self, mode):
@@ -341,7 +328,7 @@ class ResultsTab(QWidget):
         self.report_hint.setVisible(report and bool(self._report_path))
         self.activity_progress.setVisible(not report and getattr(self, '_activity_busy', False)
                                           and self.diagnostics_collapse.isChecked())
-        self._center_diagnostics_switch()
+        # The selector lives in the header layout, never overlaid on actions.
 
     def _toggle_diagnostics(self, expanded):
         self.diagnostics_stack.setVisible(expanded)
