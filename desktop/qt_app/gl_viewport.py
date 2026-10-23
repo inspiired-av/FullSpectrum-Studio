@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from array import array
 from desktop.qt_app.preview_shading import flatten_faces as _flatten_faces
+from desktop.qt_app.preview_stage6a import classify_model_drop
 import ctypes
 import math
 
@@ -133,6 +134,8 @@ def _camera_clip_planes(radius, distance):
 class ModelViewport(QOpenGLWidget):
     render_error = Signal(str)
     background_clicked = Signal()
+    model_file_dropped = Signal(str)
+    drop_feedback = Signal(str)
 
     def __init__(self,parent=None):
         super().__init__(parent)
@@ -143,6 +146,8 @@ class ModelViewport(QOpenGLWidget):
         fmt.setSamples(4)
         self.setFormat(fmt)
         self.setObjectName('modelViewport')
+        self.setAcceptDrops(True)
+        self._drop_enabled = True
         self.setMinimumHeight(270)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
@@ -358,6 +363,56 @@ class ModelViewport(QOpenGLWidget):
         except Exception as exc:
             self._error='Unable to render model: '+str(exc)
             self.render_error.emit(self._error)
+
+    def set_drop_enabled(self, enabled):
+        """Prevent model replacement while a native export is in flight."""
+        self._drop_enabled = bool(enabled)
+        if not enabled:
+            self.drop_feedback.emit('')
+
+    def _classify_drag(self, event):
+        mime = event.mimeData()
+        if not mime.hasUrls():
+            return None, 'Drop a local .3mf, .obj or .glb model.'
+        urls = mime.urls()
+        if len(urls) != 1 or not urls[0].isLocalFile():
+            return None, 'Drop exactly one local model file.'
+        return classify_model_drop((urls[0].toLocalFile(),))
+
+    def dragEnterEvent(self, event):
+        path, reason = self._classify_drag(event)
+        if not self._drop_enabled:
+            self.drop_feedback.emit('Export in progress — model changes are blocked.')
+            event.ignore()
+        elif path:
+            self.drop_feedback.emit('Drop model to open')
+            event.acceptProposedAction()
+        else:
+            self.drop_feedback.emit(reason)
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        path, _ = self._classify_drag(event)
+        if path and self._drop_enabled:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.drop_feedback.emit('')
+        event.accept()
+
+    def dropEvent(self, event):
+        path, reason = self._classify_drag(event)
+        self.drop_feedback.emit('')
+        if path and self._drop_enabled:
+            event.acceptProposedAction()
+            self.model_file_dropped.emit(path)
+        else:
+            if not self._drop_enabled:
+                reason = 'Export in progress — model changes are blocked.'
+            self.drop_feedback.emit(reason)
+            event.ignore()
 
     def mousePressEvent(self,event):
         self._last=event.position();self._drag_button=event.button()

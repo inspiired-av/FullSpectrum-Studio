@@ -63,6 +63,29 @@ def export_icon(name: str, color='#bcd0dd', size=20) -> QIcon:
         stroke((6, 2.5), (14.5, 2.5), (19, 7), (19, 21), (6, 21), (6, 2.5))
         stroke((14.5, 2.5), (14.5, 7), (19, 7))
         stroke((9, 12), (16, 12));stroke((9, 16), (16, 16))
+    elif name == 'fullscreen':
+        # Four diagonal arrows POINTING OUT toward viewport corners.
+        stroke((10, 10), (3.5, 3.5))
+        stroke((3.5, 9), (3.5, 3.5), (9, 3.5))
+        stroke((14, 10), (20.5, 3.5))
+        stroke((15, 3.5), (20.5, 3.5), (20.5, 9))
+        stroke((10, 14), (3.5, 20.5))
+        stroke((3.5, 15), (3.5, 20.5), (9, 20.5))
+        stroke((14, 14), (20.5, 20.5))
+        stroke((15, 20.5), (20.5, 20.5), (20.5, 15))
+    elif name == 'fullscreen-exit':
+        # Four arrows POINTING IN; visible exit-state distinction.
+        stroke((3, 3), (10, 10))
+        stroke((10, 5), (10, 10), (5, 10))
+        stroke((21, 3), (14, 10))
+        stroke((19, 10), (14, 10), (14, 5))
+        stroke((3, 21), (10, 14))
+        stroke((5, 14), (10, 14), (10, 19))
+        stroke((21, 21), (14, 14))
+        stroke((14, 19), (14, 14), (19, 14))
+    elif name == 'sidebar':
+        p.drawRoundedRect(QRectF(3, 4, 18, 16), 2, 2)
+        stroke((10, 4), (10, 20))
     elif name == 'open':
         stroke((15, 3), (21, 3), (21, 9));stroke((21, 3), (11, 13))
         stroke((19, 13), (19, 20), (4, 20), (4, 5), (11, 5))

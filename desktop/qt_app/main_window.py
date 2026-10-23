@@ -25,6 +25,7 @@ from desktop.qt_app.plan_preferences import (
 )
 from desktop.qt_app.filaments_tab import FilamentsTab
 from desktop.qt_app.gl_viewport import ModelViewport
+from desktop.qt_app.preview_chrome import PreviewChrome
 from desktop.qt_app.preview_worker import ModelLoadWorker
 from desktop.qt_app.forecast_worker import ForecastWorker
 from desktop.qt_app.export_worker import ExportWorker
@@ -174,14 +175,25 @@ class MainWindow(QMainWindow):
         self.reference_button = QPushButton("Reference")
         self.reference_button.clicked.connect(self._open_reference)
         h.addWidget(self.reference_button)
+        self.open_button.setIcon(export_icon('open'))
+        self.reference_button.setIcon(export_icon('file'))
+        self.sidebar_toggle = QToolButton()
+        self.sidebar_toggle.setObjectName('toggleWorkspaceSidebar')
+        compact_icon_button(self.sidebar_toggle, 'sidebar', 'Hide sidebar', side=32)
+        self.sidebar_toggle.setCheckable(True)
+        self.sidebar_toggle.setChecked(True)
+        self.sidebar_toggle.toggled.connect(self._set_sidebar_visible)
+        h.addWidget(self.sidebar_toggle)
         h.addWidget(_label("v" + APP_VERSION, "bodyMuted"))
+        self.workspace_header = header
         main.addWidget(header)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setObjectName("workspaceSplitter")
         self.splitter.addWidget(self._preview_pane())
-        self.splitter.addWidget(self._sidebar())
+        self.workspace_sidebar = self._sidebar()
+        self.splitter.addWidget(self.workspace_sidebar)
         self.splitter.setStretchFactor(0, 7)
         self.splitter.setStretchFactor(1, 3)
         self.splitter.setSizes([920, 455])
@@ -194,6 +206,7 @@ class MainWindow(QMainWindow):
         self.bottom_hint = _label("Forecast is read-only. Export Native 3MF runs the existing conversion and validation pipeline.", "helpText")
         self.bottom_hint.setWordWrap(True)
         foot.addWidget(self.bottom_hint)
+        self.workspace_footer = bottom
         main.addWidget(bottom)
 
     def _preview_pane(self):
@@ -206,6 +219,9 @@ class MainWindow(QMainWindow):
         row.addStretch()
         self.preview_mode = WheelSafeComboBox()
         self.preview_mode.addItems(["Original", "Predicted", "Color Loss", "Anchor Influence", "Wireframe"])
+        # Show all modes in the standard windowed Qt popup, including disabled
+        # modes (disabled modes indicate analysis has not been generated).
+        self.preview_mode.setMaxVisibleItems(self.preview_mode.count())
         self.preview_mode.setCurrentText("Original")
         self.preview_mode.setObjectName("previewMode")
         self.preview_mode.setEnabled(False)
@@ -225,6 +241,15 @@ class MainWindow(QMainWindow):
         self.reset_camera_button.setObjectName("resetCameraButton")
         self.reset_camera_button.setEnabled(False)
         self.reset_camera_button.clicked.connect(self._reset_camera)
+        compact_icon_button(self.reset_camera_button, 'reset', 'Reset camera to default view (R)', side=32)
+        self.expand_preview_toggle = QToolButton()
+        self.expand_preview_toggle.setObjectName('toggleExpandedPreview')
+        compact_icon_button(self.expand_preview_toggle, 'fullscreen',
+                            'Expand model preview (F11)', side=32)
+        self.expand_preview_toggle.setCheckable(True)
+        self.expand_preview_toggle.toggled.connect(self._set_expanded_preview)
+        # Fullscreen first; separate camera reset immediately to its right.
+        row.insertWidget(row.indexOf(self.reset_camera_button), self.expand_preview_toggle)
         row.addWidget(self.reset_camera_button)
         content.addLayout(row)
         # A vertical splitter makes palette inspection adjustable without taking
@@ -239,6 +264,9 @@ class MainWindow(QMainWindow):
         model_layout.setSpacing(6)
         model_area.setMinimumHeight(195)
         self.preview_surface = ModelViewport()
+        self.preview_surface.model_file_dropped.connect(self._open_model)
+        self.preview_chrome = PreviewChrome(self.preview_surface)
+        self.preview_surface.drop_feedback.connect(self.preview_chrome.set_drop_message)
         self.preview_surface.render_error.connect(self._preview_render_error)
         self.preview_surface.background_clicked.connect(self._clear_palette_selection)
         model_layout.addWidget(self.preview_surface, stretch=1)
@@ -395,6 +423,77 @@ class MainWindow(QMainWindow):
                 splitter.setSizes([max(0, total - previous), previous])
             self._assigned_inspector_previous_height = None
             self._assigned_inspector_auto_height = None
+
+    def _set_sidebar_visible(self, visible):
+        """Presentation-only sidebar toggle; do not alter plan preferences."""
+        if not hasattr(self, 'workspace_sidebar'):
+            return
+        if visible:
+            self.workspace_sidebar.show()
+            saved = getattr(self, '_saved_sidebar_split', None)
+            if saved and all(saved):
+                QTimer.singleShot(0, lambda sizes=list(saved): self.splitter.setSizes(sizes))
+        else:
+            if not self.workspace_sidebar.isHidden():
+                self._saved_sidebar_split = self.splitter.sizes()
+            self.workspace_sidebar.hide()
+        label = 'Hide sidebar' if visible else 'Show sidebar'
+        self.sidebar_toggle.setToolTip(label)
+        self.sidebar_toggle.setAccessibleName(label)
+
+    def _set_expanded_preview(self, expanded):
+        """Show a large, popup-safe preview without Windows native fullscreen.
+
+        On some Windows HDR / OpenGL drivers, showFullScreen() promotes the
+        QOpenGLWidget into an independent fullscreen presentation path. Qt
+        combobox, menu and help popups then re-trigger display negotiation,
+        causing blank frames or HDR toggles and sometimes invisible menus.
+        A normal maximized window keeps the scene and popups composed together.
+        The title bar / taskbar may remain visible by design.
+        """
+        if expanded:
+            self._palette_split_before_expand = self.preview_splitter.sizes()
+            self._palette_was_visible = not self._source_palette_area.isHidden()
+            self._preview_was_maximized = self.isMaximized()
+            self.workspace_sidebar.hide()
+            self._source_palette_area.hide()
+            self.workspace_header.hide()
+            self.workspace_footer.hide()
+            self.menuBar().hide()
+            self.statusBar().hide()
+            # Do NOT call showFullScreen: windowed maximization keeps native
+            # dropdown/help popup windows in the regular desktop composition.
+            self.showMaximized()
+        else:
+            if getattr(self, '_preview_was_maximized', False):
+                self.showMaximized()
+            else:
+                self.showNormal()
+            self.workspace_header.show()
+            self.workspace_footer.show()
+            self.menuBar().show()
+            self.statusBar().show()
+            if getattr(self, '_palette_was_visible', True):
+                self._source_palette_area.show()
+            if self.sidebar_toggle.isChecked():
+                self.workspace_sidebar.show()
+            sizes = getattr(self, '_palette_split_before_expand', None)
+            if sizes and all(sizes):
+                QTimer.singleShot(0, lambda values=list(sizes): self.preview_splitter.setSizes(values))
+        self.expand_preview_toggle.setIcon(export_icon(
+            'fullscreen-exit' if expanded else 'fullscreen'))
+        label = ('Restore workspace (Esc or F11)' if expanded
+                 else 'Expand model preview (F11)')
+        self.expand_preview_toggle.setToolTip(label)
+        self.expand_preview_toggle.setAccessibleName(label)
+        self.preview_surface.update()
+
+    def _handle_view_escape(self):
+        """Esc closes fullscreen; otherwise retains the existing palette shortcut."""
+        if self.expand_preview_toggle.isChecked():
+            self.expand_preview_toggle.setChecked(False)
+        else:
+            self._clear_palette_selection()
 
     def _sidebar(self):
         sidebar = QFrame()
@@ -1789,7 +1888,7 @@ class MainWindow(QMainWindow):
         menu.addAction(close)
         clear_color=QAction('Clear Source Color Selection', self)
         clear_color.setShortcut(QKeySequence('Escape'))
-        clear_color.triggered.connect(self._clear_palette_selection)
+        clear_color.triggered.connect(self._handle_view_escape)
         self.addAction(clear_color)
         view = self.menuBar().addMenu("&View")
         for idx, name in enumerate(("Plan", "Filaments", "Export")):
@@ -1797,6 +1896,12 @@ class MainWindow(QMainWindow):
             nav.setShortcut(QKeySequence(f"Ctrl+{idx+1}"))
             nav.triggered.connect(lambda checked=False, index=idx: self.tabs.setCurrentIndex(index))
             view.addAction(nav)
+        view.addSeparator()
+        fullscreen = QAction('Toggle Expanded Model Preview', self)
+        fullscreen.setShortcut(QKeySequence('F11'))
+        fullscreen.triggered.connect(self.expand_preview_toggle.toggle)
+        view.addAction(fullscreen)
+        self.addAction(fullscreen)  # Active even while the menu bar is hidden.
 
     def _tab_changed(self, index):
         if index == 1:
@@ -1817,11 +1922,13 @@ class MainWindow(QMainWindow):
                 worker.wait()
         super().closeEvent(event)
 
-    def _open_model(self):
+    def _open_model(self, path=None):
         if self._export_task is not None:
             QMessageBox.information(self, 'Export in progress', 'Wait for export to finish before changing models.')
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open 3D Model", "", MODEL_FILE_FILTER)
+        # QAction/QPushButton passes a bool, while the viewport emits a file path.
+        if not isinstance(path, (str, os.PathLike)):
+            path, _ = QFileDialog.getOpenFileName(self, "Open 3D Model", "", MODEL_FILE_FILTER)
         if not self.state.select_model(path):
             return
         name = display_filename(path)
@@ -1874,6 +1981,9 @@ class MainWindow(QMainWindow):
         self.source_palette_message.setText('Reading source color assignments…')
         serial = self._preview_serial
         self.preview_surface.clear_mesh()
+        if hasattr(self, 'preview_chrome'):
+            self.preview_chrome.set_model()
+            self.preview_chrome.set_estimate(None)
         self.preview_mode.setEnabled(False)
         self.reset_camera_button.setEnabled(False)
         self.preview_status.setText("Reading model geometry…")
@@ -1900,6 +2010,9 @@ class MainWindow(QMainWindow):
             return
         self._original_mesh = mesh
         self.preview_surface.set_mesh(mesh)
+        if hasattr(self, 'preview_chrome'):
+            self.preview_chrome.set_model(display_filename(path), len(mesh.triangles),
+                                          mesh.source_triangles, sampled=mesh.sampled)
         self._update_preview_highlights()
         self.reset_camera_button.setEnabled(True)
         self.preview_mode.setEnabled(True)
@@ -2000,6 +2113,11 @@ class MainWindow(QMainWindow):
                 self._clear_live_preview()
             else:
                 self._mark_live_preview_stale()
+        if hasattr(self, 'preview_chrome'):
+            if clear_inspection:
+                self.preview_chrome.set_estimate(None)
+            else:
+                self.preview_chrome.mark_outdated()
         if clear_inspection:
             # Prevent ever displaying an unrelated model's last forecast.
             self._forecast_view.reset(self.state.model_path)
@@ -2200,6 +2318,8 @@ class MainWindow(QMainWindow):
         self.details_toggle.setEnabled(True)
         forecast = result['forecast']
         self.accuracy.set_value(forecast['accuracy'])
+        if hasattr(self, 'preview_chrome'):
+            self.preview_chrome.set_estimate(forecast['accuracy'])
         self.confidence_gauge.set_value(forecast['confidence'])
         self.worst_match_panel.set_forecast(forecast)
         self.forecast_metrics['Confidence'].setText(f"{forecast['confidence']:.0f}%")
@@ -2545,6 +2665,8 @@ class MainWindow(QMainWindow):
         if not self._live_preview_meshes:
             return
         self._live_preview_stale = True
+        if hasattr(self, 'preview_chrome'):
+            self.preview_chrome.mark_outdated()
         self.anchor_legend.selected_slot = 0
         self.anchor_legend.setVisible(False)
         if hasattr(self, 'preview_mode') and self.preview_mode.currentText() in (
@@ -2709,6 +2831,7 @@ class MainWindow(QMainWindow):
         self._completed_export_success = False
         self.open_button.setEnabled(False)
         self.reference_button.setEnabled(False)
+        self.preview_surface.set_drop_enabled(False)
         self.export_directory_browse.setEnabled(False)
         worker = ExportWorker(request, self)
         self._export_task = worker
@@ -2782,6 +2905,7 @@ class MainWindow(QMainWindow):
         self._completed_export_success = False
         self.open_button.setEnabled(True)
         self.reference_button.setEnabled(True)
+        self.preview_surface.set_drop_enabled(True)
         self.export_directory_browse.setEnabled(True)
         self.forecast_refresh.setEnabled(bool(self.state.model_path) and self._filament_decision().ready)
         self.export_action_stack.setCurrentWidget(self.compose_button)

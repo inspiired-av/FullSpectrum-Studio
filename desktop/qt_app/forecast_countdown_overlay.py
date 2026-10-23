@@ -47,6 +47,8 @@ class ForecastCountdownOverlay(QFrame):
         self.setObjectName('forecastCountdownOverlay')
         self.setAccessibleName('Automatic forecast countdown')
         self._source_timer = None
+        # A heavy model may delay this widget's first visible paint.
+        self._reset_on_first_paint = False
         self._display_tick = QTimer(self)
         self._display_tick.setInterval(100)
         self._display_tick.timeout.connect(self._refresh)
@@ -109,17 +111,36 @@ class ForecastCountdownOverlay(QFrame):
 
     def begin(self, timer):
         self._source_timer = timer
+        # The cancel window begins only after the actual popup is painted.
+        # The original QTimer remains the only forecast scheduler.
+        self._reset_on_first_paint = True
         self._refresh()
         if timer.isActive():
             self.position_over_viewport()
             self.show()
             self.raise_()
             self._display_tick.start()
+            self.update()  # Schedule first paint even on timer restarts.
 
     def dismiss(self):
+        self._reset_on_first_paint = False
         self._display_tick.stop()
         self._source_timer = None
         self.hide()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._reset_on_first_paint:
+            return
+        self._reset_on_first_paint = False
+        timer = self._source_timer
+        if timer is not None and timer.isActive() and self.isVisible():
+            # The timer was armed by MainWindow before the popup had a chance
+            # to paint. Reset *that same timer* to its full interval now. Call
+            # the native QTimer method so ForecastCountdownTimer.start() does
+            # not emit `armed` again and create a second overlay cycle.
+            QTimer.start(timer)
+            self._refresh()
 
     def _refresh(self):
         timer = self._source_timer
