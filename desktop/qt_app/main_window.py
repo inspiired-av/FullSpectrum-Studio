@@ -177,9 +177,11 @@ class MainWindow(QMainWindow):
         self._forecast_timer.armed.connect(self._show_auto_forecast_countdown)
         self._forecast_timer.disarmed.connect(self._hide_auto_forecast_countdown)
         self._build_menus()
-        if self._plate_default_pending:
-            # Lazy background discovery only for users who saved a plate.
-            QTimer.singleShot(0, self._refresh_plate_catalog)
+        # Warm the installed-plate catalog on every launch, even without a
+        # saved default. _refresh_plate_catalog runs its filesystem scan in a
+        # QThread: the window remains interactive, and only the chosen plate
+        # mesh is loaded. A later click can reuse the finished catalog.
+        QTimer.singleShot(0, self._refresh_plate_catalog)
         self._initial_filament_ui_timer.start(0)
         self.statusBar().showMessage(
             "Qt Stage 4D-D3 — staged filament edits and explicit forecast updates."
@@ -2079,22 +2081,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('Default 3D build plate saved: ' + asset.label)
 
     def _clear_plate_default(self):
-        """Forget the default AND remove its currently displayed plate.
+        """Forget the saved preference, not the active preview plate.
 
-        A clear request should not leave a session plate visible or let a
-        previously launched async plate worker restore it later. The original
-        model, forecast, and camera remain untouched.
+        An explicitly selected plate (or an in-progress load) belongs to
+        this session and must not be removed by editing the default.
+        Cancel any pending *automatic* default restoration instead.
         """
         self._plate_default = None
         self._plate_default_pending = False
-        # Invalidate an in-flight plate load before clearing its selection.
-        self._plate_load_serial += 1
-        self._plate_selected = None
-        self._plate_loaded_mesh = None
-        self.preview_surface.set_plate(None)
-        self._update_plate_actions()
         self._save_plate_workspace()
-        self.statusBar().showMessage('Saved default and displayed build plate cleared.')
+        self.statusBar().showMessage('Saved default build plate cleared; displayed plate unchanged.')
 
     def _refresh_plate_catalog(self):
         """Discover installed slicer plate profiles without blocking the viewport."""
@@ -2155,7 +2151,10 @@ class MainWindow(QMainWindow):
         catalog = self._plate_catalog
         if catalog is None:
             self._plate_pending_picker = True
-            self._refresh_plate_catalog()
+            # Startup warming may already be scanning in a QThread. Joining
+            # that scan avoids marking an unnecessary second full rescan.
+            if self._plate_catalog_task is None:
+                self._refresh_plate_catalog()
             return
         if not catalog.plates:
             QMessageBox.information(self, 'No Installed Build Plates',
@@ -2163,34 +2162,13 @@ class MainWindow(QMainWindow):
                 'or select an existing resources/profiles folder from the build-plate menu.')
             return
         dialog = PlatePickerDialog(catalog.plates, self, saved_default=self._plate_default)
-        # Clear default is an immediate destructive preference action, not a
-        # pending picker selection: Cancel/Close must not undo the clear.
-        # Hook the existing dialog button without altering the picker layout.
-        clear_now = {'done': False}
-
-        def on_clear_default():
-            clear_now['done'] = True
-            self._clear_plate_default()
-            # Clicking OK after Clear must not silently reload the old plate.
-            # Users may still explicitly select another plate afterwards.
-            if hasattr(dialog, 'list') and dialog.list is not None:
-                dialog.list.clearSelection()
-                dialog.list.setCurrentRow(-1)
-            dialog.selected_asset = None
-
-        clear_buttons = [button for button in dialog.findChildren(QPushButton)
-                         if button.text().strip().casefold() == 'clear default']
-        if len(clear_buttons) == 1:
-            clear_buttons[0].setToolTip(
-                'Immediately forget the saved default and remove the displayed plate. '
-                'Closing this dialog does not undo the clear.')
-            clear_buttons[0].clicked.connect(on_clear_default)
+        # Picker changes are staged: Cancel leaves both the saved default
+        # and the current preview untouched.
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        # Fallback for an older dialog without an exposed clear button.
-        if dialog.clear_saved_default and not clear_now['done']:
+        if dialog.clear_saved_default:
             self._clear_plate_default()
-        # Remember is an intention: without a chosen plate, do not save one.
+        # A clear-only action is valid; choosing a plate is optional.
         if dialog.selected_asset is not None:
             self._select_plate_asset(dialog.selected_asset)
             if dialog.remember_default.isChecked():

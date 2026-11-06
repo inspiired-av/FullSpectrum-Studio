@@ -65,16 +65,17 @@ class FakePlateList:
 
 
 class PlateDefaultCameraTests(TestCase):
-    def test_clear_forgets_default_removes_current_plate_and_invalidates_worker(self):
+    def test_clear_forgets_default_but_preserves_active_plate_and_worker(self):
         with TemporaryDirectory() as directory:
-            path = Path(directory)/'plate_workspace.json'
+            path = Path(directory) / 'plate_workspace.json'
             def write_workspace(path_, value):
                 Path(path_).write_text(json.dumps(value), encoding='utf-8')
+            selected = SimpleNamespace(label='Orca plate')
             host = SimpleNamespace(
-                _plate_default={'printer':'H2C','source':'Bambu Studio'},
+                _plate_default={'printer':'H2C','vendor':'BBL','source':'Bambu Studio'},
                 _plate_default_pending=True,
                 _plate_load_serial=8,
-                _plate_selected=SimpleNamespace(label='H2C'),
+                _plate_selected=selected,
                 _plate_loaded_mesh='STL mesh',
                 _plate_workspace={'default':{'printer':'H2C'},'visible':True},
                 _plate_visible=True, _plate_custom_exes=[], _plate_custom_roots=[],
@@ -88,56 +89,22 @@ class PlateDefaultCameraTests(TestCase):
             host._save_plate_workspace=lambda:save(host)
             clear(host)
             self.assertIsNone(host._plate_default)
-            self.assertIsNone(host._plate_selected)
-            self.assertIsNone(host._plate_loaded_mesh)
             self.assertFalse(host._plate_default_pending)
-            self.assertEqual(host._plate_load_serial,9)
-            host.preview_surface.set_plate.assert_called_once_with(None)
-            host._update_plate_actions.assert_called_once()
+            self.assertIs(host._plate_selected, selected)
+            self.assertEqual(host._plate_loaded_mesh, 'STL mesh')
+            self.assertEqual(host._plate_load_serial, 8)
+            host.preview_surface.set_plate.assert_not_called()
+            host._update_plate_actions.assert_not_called()
             saved=json.loads(path.read_text(encoding='utf-8'))
-            self.assertNotIn('default',saved)
-            # What a new MainWindow would see after reopening the program.
-            self.assertIsNone(saved.get('default'))
-            self.assertFalse(saved.get('default') is not None)
+            self.assertNotIn('default', saved)
             self.assertTrue(saved['visible'])
 
-    def test_clear_button_persists_even_if_picker_is_cancelled(self):
-        button=FakeButton()
+    def test_clear_button_cancel_discards_pending_change(self):
         dialog=SimpleNamespace(
-            list=FakePlateList(), selected_asset=SimpleNamespace(label='old'),
-            clear_saved_default=True, remember_default=SimpleNamespace(isChecked=lambda:False),
-            findChildren=lambda _type:[button],
+            selected_asset=None, clear_saved_default=True,
+            remember_default=SimpleNamespace(isChecked=lambda:False),
+            exec=lambda:0,
         )
-        dialog.exec=lambda:(button.clicked.fire(),0)[1]
-        clear=Mock()
-        host=SimpleNamespace(
-            _plate_catalog=SimpleNamespace(plates=[object()]),
-            _plate_default={'printer':'H2C'},
-            _clear_plate_default=clear,
-            _select_plate_asset=Mock(),
-            _make_selected_plate_default=Mock(),
-        )
-        picker=extract_method('_choose_plate', {
-            'PlatePickerDialog':lambda *args,**kwargs:dialog,
-            'QDialog':SimpleNamespace(DialogCode=SimpleNamespace(Accepted=1)),
-            'QPushButton':FakeButton,
-        })
-        picker(host)
-        clear.assert_called_once()
-        self.assertTrue(dialog.list.selection_cleared)
-        self.assertEqual(dialog.list.current_row,-1)
-        self.assertIsNone(dialog.selected_asset)
-        host._select_plate_asset.assert_not_called()
-        self.assertIn('Immediately forget',button.tooltip)
-
-    def test_empty_picker_does_not_reselect_or_save_default(self):
-        button=FakeButton()
-        dialog=SimpleNamespace(
-            list=FakePlateList(), selected_asset=None,
-            clear_saved_default=True, remember_default=SimpleNamespace(isChecked=lambda:True),
-            findChildren=lambda _type:[button],
-        )
-        dialog.exec=lambda:(button.clicked.fire(),1)[1]
         host=SimpleNamespace(
             _plate_catalog=SimpleNamespace(plates=[object()]),
             _plate_default={'printer':'H2C'},
@@ -145,30 +112,44 @@ class PlateDefaultCameraTests(TestCase):
             _select_plate_asset=Mock(),
             _make_selected_plate_default=Mock(),
         )
-        picker=extract_method('_choose_plate', {
+        chooser=extract_method('_choose_plate', {
             'PlatePickerDialog':lambda *args,**kwargs:dialog,
             'QDialog':SimpleNamespace(DialogCode=SimpleNamespace(Accepted=1)),
-            'QPushButton':FakeButton,
         })
-        picker(host)
+        chooser(host)
+        host._clear_plate_default.assert_not_called()
+        host._select_plate_asset.assert_not_called()
+        host._make_selected_plate_default.assert_not_called()
+
+    def test_accept_clear_without_selection_does_not_reselect_or_save(self):
+        dialog=SimpleNamespace(
+            selected_asset=None, clear_saved_default=True,
+            remember_default=SimpleNamespace(isChecked=lambda:True),
+            exec=lambda:1,
+        )
+        host=SimpleNamespace(
+            _plate_catalog=SimpleNamespace(plates=[object()]),
+            _plate_default={'printer':'H2C'},
+            _clear_plate_default=Mock(),
+            _select_plate_asset=Mock(),
+            _make_selected_plate_default=Mock(),
+        )
+        chooser=extract_method('_choose_plate', {
+            'PlatePickerDialog':lambda *args,**kwargs:dialog,
+            'QDialog':SimpleNamespace(DialogCode=SimpleNamespace(Accepted=1)),
+        })
+        chooser(host)
         host._clear_plate_default.assert_called_once()
         host._select_plate_asset.assert_not_called()
         host._make_selected_plate_default.assert_not_called()
 
     def test_reselect_and_remember_new_plate_after_clearing(self):
-        button=FakeButton()
         replacement=SimpleNamespace(label='OrcaSlicer printer')
         dialog=SimpleNamespace(
-            list=FakePlateList(), selected_asset=None,
-            clear_saved_default=True, remember_default=SimpleNamespace(isChecked=lambda:True),
-            findChildren=lambda _type:[button],
+            selected_asset=replacement, clear_saved_default=True,
+            remember_default=SimpleNamespace(isChecked=lambda:True),
+            exec=lambda:1,
         )
-        def run_dialog():
-            button.clicked.fire()
-            # A deliberate new choice after Clear is still valid.
-            dialog.selected_asset = replacement
-            return 1
-        dialog.exec=run_dialog
         host=SimpleNamespace(
             _plate_catalog=SimpleNamespace(plates=[object()]),
             _plate_default={'printer':'H2C'},
@@ -176,12 +157,11 @@ class PlateDefaultCameraTests(TestCase):
             _select_plate_asset=Mock(),
             _make_selected_plate_default=Mock(),
         )
-        picker=extract_method('_choose_plate', {
+        chooser=extract_method('_choose_plate', {
             'PlatePickerDialog':lambda *args,**kwargs:dialog,
             'QDialog':SimpleNamespace(DialogCode=SimpleNamespace(Accepted=1)),
-            'QPushButton':FakeButton,
         })
-        picker(host)
+        chooser(host)
         host._clear_plate_default.assert_called_once()
         host._select_plate_asset.assert_called_once_with(replacement)
         host._make_selected_plate_default.assert_called_once()

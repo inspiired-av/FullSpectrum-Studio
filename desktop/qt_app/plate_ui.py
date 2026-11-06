@@ -78,9 +78,11 @@ class PlatePickerDialog(QDialog):
         self.count = QLabel()
         layout.addWidget(self.count)
         defaults = QHBoxLayout()
+        self._remember_user_override = None  # None = follow saved default; bool = user choice.
         self.remember_default = QCheckBox('Remember selected plate as default')
         self.remember_default.setEnabled(True)
         self.remember_default.setObjectName("rememberBuildPlateDefault")
+        self.remember_default.clicked.connect(self._remember_default_clicked)
         defaults.addWidget(self.remember_default, 1)
         self.forget_default_button = QPushButton('Clear default')
         self.forget_default_button.setObjectName("clearBuildPlateDefault")
@@ -113,16 +115,27 @@ class PlatePickerDialog(QDialog):
         self.count.setText(f'{matches} matching build plates')
         self._refresh_actions()
 
+    def _remember_default_clicked(self, checked):
+        """Track a user click, not a programmatic checkbox synchronization."""
+        self._remember_user_override = bool(checked)
+
     def _forget_default(self):
+        # Clearing is staged until OK. Reset the checkbox for the current
+        # transaction, but let the user check Remember afterwards to replace it.
         self.clear_saved_default = True
         self.saved_default = {}
+        self._remember_user_override = False
         self.remember_default.setChecked(False)
         self.forget_default_button.setVisible(False)
+        self._refresh_actions()
 
     def _refresh_actions(self):
         item = self.list.currentItem()
         self.remember_default.setEnabled(True)
-        if item is not None:
+        # The initial checkbox state may follow the saved default, but a real
+        # user click is intentional. Do not reset it when search/list selection
+        # changes afterwards (including when Remember was checked first).
+        if item is not None and getattr(self, '_remember_user_override', None) is None:
             asset = item.data(Qt.ItemDataRole.UserRole)
             saved = self.saved_default
             same_default = (str(saved.get('printer', '')).casefold() == asset.printer.casefold()
@@ -131,11 +144,13 @@ class PlatePickerDialog(QDialog):
             self.remember_default.setChecked(same_default)
         ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         if ok:
-            ok.setEnabled(self.list.currentItem() is not None)
+            # Clear-only is valid; a new plate selection is not required.
+            ok.setEnabled(item is not None or self.clear_saved_default)
 
     def _accept(self, *_args):
         item = self.list.currentItem()
-        if item is None:
+        if item is None and not self.clear_saved_default:
             return
-        self.selected_asset = item.data(Qt.ItemDataRole.UserRole)
+        self.selected_asset = (item.data(Qt.ItemDataRole.UserRole)
+                               if item is not None else None)
         self.accept()
