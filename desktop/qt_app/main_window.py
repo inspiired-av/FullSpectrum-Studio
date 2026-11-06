@@ -30,6 +30,11 @@ from desktop.qt_app.preview_chrome import PreviewChrome
 from desktop.qt_app.plate_ui import PlateCatalogWorker, PlateLoadWorker, PlatePickerDialog
 from desktop.qt_app.plate_toolbar_icons import plate_eye_icon
 from desktop.qt_app.preview_toolbar_icons import preview_toolbar_icon
+from desktop.qt_app.preview_grid_policy import (
+    read_grid_settings, write_grid_settings, settings_path as preview_grid_settings_path,
+    set_grid_mode as change_grid_mode, toggle_grid as toggle_grid_setting,
+    GRID_MODES,
+)
 from desktop.qt_app.preview_mode_combo import ModernPreviewComboBox
 from desktop.qt_app.preview_toolbar import (
     AdaptivePreviewToolbar, make_preview_group, separator as preview_toolbar_separator,
@@ -164,6 +169,8 @@ class MainWindow(QMainWindow):
         self._plate_load_serial = 0
         self._plate_settings_path = workspace_path(settings_path)
         self._plate_workspace = read_workspace(self._plate_settings_path)
+        self._grid_settings_path = preview_grid_settings_path(self._plate_settings_path)
+        self._grid_settings = read_grid_settings(self._grid_settings_path)
         self._plate_default = self._plate_workspace.get('default')
         self._plate_default_pending = self._plate_default is not None
         self._plate_visible = self._plate_workspace.get('visible', True)
@@ -289,6 +296,23 @@ class MainWindow(QMainWindow):
         self.preview_use_imported_action = self.preview_options_menu.addAction('Use Imported OBJ Prediction')
         self.preview_use_imported_action.setCheckable(True)
         self.preview_use_imported_action.triggered.connect(self._use_imported_predicted_preview)
+        # A preview-only submenu, separate from imported prediction sources.
+        self.preview_options_menu.addSeparator()
+        self.preview_grid_menu = self.preview_options_menu.addMenu('Grid and Axes')
+        self.preview_grid_actions = {}
+        labels = {'automatic': 'Automatic (recommended)', 'plate': 'Plate Grid',
+                  'perspective': 'Perspective Grid', 'off': 'Off'}
+        for mode in GRID_MODES:
+            action = self.preview_grid_menu.addAction(labels[mode])
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked=False, value=mode: self._set_preview_grid_mode(value))
+            self.preview_grid_actions[mode] = action
+        self.preview_grid_menu.addSeparator()
+        self.preview_axes_action = self.preview_grid_menu.addAction('Show XYZ axis marker')
+        self.preview_axes_action.setCheckable(True)
+        self.preview_axes_action.toggled.connect(self._set_preview_axes_visible)
+        self.preview_grid_menu.aboutToShow.connect(self._refresh_preview_grid_actions)
         self.preview_options_menu.aboutToShow.connect(self._update_preview_options)
         self.preview_options_button.setMenu(self.preview_options_menu)
         self.preview_options_button.hide()  # No model: nothing to import.
@@ -313,9 +337,25 @@ class MainWindow(QMainWindow):
         self.plate_visibility_button.setToolTip('Show or hide the selected build plate')
         self.plate_visibility_button.setAccessibleName('Show build plate')
         self.plate_visibility_button.clicked.connect(self._toggle_plate_visibility)
+        # Compact quick-toggle: additional modes and XYZ visibility live in the
+        # existing Preview Options > Grid and Axes menu.
+        self.preview_grid_button = QToolButton()
+        self.preview_grid_button.setObjectName('previewGridButton')
+        self.preview_grid_button.setFixedSize(34, 32)
+        self.preview_grid_button.setIcon(preview_toolbar_icon('grid'))
+        self.preview_grid_button.setIconSize(QSize(20, 20))
+        self.preview_grid_button.setCheckable(True)
+        self.preview_grid_button.setChecked(self._grid_settings['mode'] != 'off')
+        self.preview_grid_button.setStyleSheet(
+            'QToolButton#previewGridButton:checked { background: #2c4555; '
+            'border: 1px solid #4a8194; border-radius: 5px; }')
+        self.preview_grid_button.setToolTip(
+            'Toggle grid. Configure grid type and axis marker in Preview Options.')
+        self.preview_grid_button.setAccessibleName('Toggle preview grid')
+        self.preview_grid_button.toggled.connect(self._toggle_preview_grid)
         self.preview_plate_group = make_preview_group(
             self.plate_button, preview_toolbar_separator(), self.plate_visibility_button,
-            name='build_plate')
+            preview_toolbar_separator(), self.preview_grid_button, name='build_plate')
 
         self.expand_preview_toggle = QToolButton()
         self.expand_preview_toggle.setObjectName('toggleExpandedPreview')
@@ -357,11 +397,15 @@ class MainWindow(QMainWindow):
         model_layout.setSpacing(6)
         model_area.setMinimumHeight(195)
         self.preview_surface = ModelViewport()
+        self.preview_surface.set_grid_preferences(
+            self._grid_settings['mode'], self._grid_settings['axes'])
+        self._refresh_preview_grid_actions()
         self.preview_surface.model_file_dropped.connect(self._open_model)
         self.preview_chrome = PreviewChrome(self.preview_surface)
         self.preview_surface.drop_feedback.connect(self.preview_chrome.set_drop_message)
         self.preview_surface.render_error.connect(self._preview_render_error)
         self.preview_surface.plate_render_error.connect(self._plate_render_failed)
+        self.preview_surface.grid_render_error.connect(self._grid_render_failed)
         self.preview_surface.background_clicked.connect(self._clear_palette_selection)
         model_layout.addWidget(self.preview_surface, stretch=1)
         self.preview_status = _label("Open a 3MF, OBJ or GLB model to view its geometry.", "helpText", wrap=True)
@@ -2017,6 +2061,40 @@ class MainWindow(QMainWindow):
         view.addAction(fullscreen)
         self.addAction(fullscreen)  # Active even while the menu bar is hidden.
 
+    def _refresh_preview_grid_actions(self):
+        for mode, action in self.preview_grid_actions.items():
+            with QSignalBlocker(action):
+                action.setChecked(mode == self._grid_settings['mode'])
+        with QSignalBlocker(self.preview_axes_action):
+            self.preview_axes_action.setChecked(self._grid_settings['axes'])
+        if hasattr(self, 'preview_grid_button'):
+            with QSignalBlocker(self.preview_grid_button):
+                self.preview_grid_button.setChecked(self._grid_settings['mode'] != 'off')
+            self.preview_grid_button.setToolTip(
+                'Grid: ' + self._grid_settings['mode'].title() +
+                ' · Click to toggle; options in Preview Options > Grid and Axes')
+
+    def _commit_preview_grid_settings(self):
+        self._refresh_preview_grid_actions()
+        self.preview_surface.set_grid_preferences(
+            self._grid_settings['mode'], self._grid_settings['axes'])
+        try:
+            write_grid_settings(self._grid_settings_path, self._grid_settings)
+        except OSError as exc:
+            self.statusBar().showMessage('Unable to save preview grid settings: ' + str(exc))
+
+    def _set_preview_grid_mode(self, mode):
+        self._grid_settings = change_grid_mode(self._grid_settings, mode)
+        self._commit_preview_grid_settings()
+
+    def _toggle_preview_grid(self, enabled):
+        self._grid_settings = toggle_grid_setting(self._grid_settings, enabled)
+        self._commit_preview_grid_settings()
+
+    def _set_preview_axes_visible(self, enabled):
+        self._grid_settings['axes'] = bool(enabled)
+        self._commit_preview_grid_settings()
+
     def _save_plate_workspace(self):
         """Persist preview-only state, separate from export/filament settings."""
         state = dict(self._plate_workspace)
@@ -2264,6 +2342,9 @@ class MainWindow(QMainWindow):
         if worker in self._plate_load_threads:
             self._plate_load_threads.remove(worker)
         worker.deleteLater()
+
+    def _grid_render_failed(self, message):
+        self.statusBar().showMessage('Perspective grid unavailable: ' + message)
 
     def _plate_render_failed(self, message):
         self.plate_button.setToolTip('Build plate renderer unavailable: ' + message)

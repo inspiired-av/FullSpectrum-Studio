@@ -8,7 +8,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
-_VALID = frozenset({'expand', 'restore', 'reset', 'more'})
+_VALID = frozenset({'expand', 'restore', 'reset', 'more', 'grid'})
 
 
 def preview_toolbar_icon(name: str, color: str = '#d1dfe8') -> QIcon:
@@ -55,6 +55,13 @@ def preview_toolbar_icon(name: str, color: str = '#d1dfe8') -> QIcon:
         painter.drawPath(curve)
         painter.drawLine(QPointF(3.2, 4.6), QPointF(3.2, 10.7))
         painter.drawLine(QPointF(3.2, 10.7), QPointF(9.3, 10.7))
+    elif name == 'grid':
+        # Four by four outlined cells inside the same 24-unit icon geometry.
+        painter.drawRoundedRect(5, 5, 14, 14, 1.0, 1.0)
+        painter.drawLine(QPointF(9.7, 5), QPointF(9.7, 19))
+        painter.drawLine(QPointF(14.3, 5), QPointF(14.3, 19))
+        painter.drawLine(QPointF(5, 9.7), QPointF(19, 9.7))
+        painter.drawLine(QPointF(5, 14.3), QPointF(19, 14.3))
     else:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(color))

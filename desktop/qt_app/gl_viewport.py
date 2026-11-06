@@ -9,6 +9,10 @@ from array import array
 from desktop.qt_app.preview_shading import flatten_faces as _flatten_faces
 from desktop.qt_app.preview_stage6a import classify_model_drop
 from desktop.qt_app.plate_gl import PlateGpuRenderer
+from desktop.qt_app.preview_grid_gl import WorldGridRenderer
+from desktop.qt_app.preview_axis_indicator import ViewAxisIndicator
+from desktop.qt_app.preview_grid_policy import choose_grid_layers
+from desktop.qt_app.plate_mesh import combined_scene_bounds
 from desktop.qt_app.plate_mesh import plate_offset, scene_clip_planes
 import ctypes
 import math
@@ -139,6 +143,7 @@ class ModelViewport(QOpenGLWidget):
     model_file_dropped = Signal(str)
     drop_feedback = Signal(str)
     plate_render_error = Signal(str)
+    grid_render_error = Signal(str)
 
     def __init__(self,parent=None):
         super().__init__(parent)
@@ -158,6 +163,10 @@ class ModelViewport(QOpenGLWidget):
         self._gl=None;self._program=0;self._vao=0;self._vbo=0;self._error=''
         self._influence_data=None;self._influence_texture=0;self._influence_dirty=False
         self._plate_renderer = PlateGpuRenderer()  # Own GL objects; never part of model buffers.
+        self._world_grid = WorldGridRenderer()  # Independent resources; draw only when requested.
+        self._grid_mode = 'automatic'
+        self._grid_show_axes = True
+        self._grid_failed = False
         self._influence_display='physical';self._influence_selected=0
         self._last=None;self._drag_button=None
         self._press_position=None
@@ -170,6 +179,7 @@ class ModelViewport(QOpenGLWidget):
         self.pan_x=0.;self.pan_y=0.
         self._center=(0.,0.,0.);self._radius=1.
         self.setToolTip('Left drag: orbit · Right drag or Shift+drag: pan · Wheel: zoom · R: reset view')
+        self._axis_indicator = ViewAxisIndicator(self)
 
     @property
     def mesh(self):return self._mesh
@@ -180,6 +190,8 @@ class ModelViewport(QOpenGLWidget):
         self._data=(getattr(mesh, 'render_buffer', None) or _flatten_faces(mesh)) if mesh else None
         self._verts=len(self._data)//12 if self._data is not None else 0
         self._dirty=True
+        self._axis_indicator.setVisible(mesh is not None and self._grid_show_axes)
+        self._axis_indicator.update()
         if preserve_camera:
             self.update()
         else:
@@ -192,6 +204,16 @@ class ModelViewport(QOpenGLWidget):
     def set_plate(self, plate_mesh, texture_path=None):
         """Swap visual plate assets without touching the model mesh, camera or exports."""
         self._plate_renderer.set_plate(plate_mesh, texture_path)
+        self.update()
+
+    def set_grid_preferences(self, mode='automatic', show_axes=True):
+        """Display-only: grid and XYZ overlay never enter export/forecast data."""
+        if mode not in ('automatic', 'plate', 'perspective', 'off'):
+            raise ValueError('Unknown grid mode: ' + str(mode))
+        self._grid_mode = mode
+        self._grid_show_axes = bool(show_axes)
+        self._axis_indicator.setVisible(self._mesh is not None and self._grid_show_axes)
+        self._axis_indicator.update()
         self.update()
 
     def set_highlights(self, selected=None, protected=()):
@@ -256,6 +278,7 @@ class ModelViewport(QOpenGLWidget):
                 x0,y0,z0,x1,y1,z1 = combined
                 self._center=((x0+x1)/2,(y0+y1)/2,(z0+z1)/2)
             self._radius=max(math.dist((x0,y0,z0),(x1,y1,z1))/2,0.01)
+        self._axis_indicator.update()
         self.update()
 
     def set_wireframe(self,enabled):
@@ -389,6 +412,10 @@ class ModelViewport(QOpenGLWidget):
             if self.wireframe:gl.glPolygonMode(gl.GL_FRONT_AND_BACK,gl.GL_FILL)
             gl.glBindVertexArray(0);gl.glUseProgram(0)
             plate = self._plate_renderer.mesh
+            show_plate_grid, show_world_grid = choose_grid_layers(
+                self._grid_mode, plate_visible=plate is not None,
+                plate_has_art=bool(self._plate_renderer.texture_path))
+            self._plate_renderer.grid_enabled = show_plate_grid
             if plate is not None:
                 try:
                     self._plate_renderer.draw(gl, mvp,
@@ -397,6 +424,17 @@ class ModelViewport(QOpenGLWidget):
                     # A bad vendor texture/GL resource must not poison model rendering.
                     self._plate_renderer.set_plate(None)
                     self.plate_render_error.emit(str(plate_exc))
+            if show_world_grid and not self._grid_failed:
+                try:
+                    floor_z = self._mesh.bounds[2] - 0.75
+                    if plate is not None:
+                        floor_z = combined_scene_bounds(
+                            self._mesh.bounds, plate.bounds)[2] - 0.75
+                    self._world_grid.draw(gl, mvp, self._mesh.bounds, floor_z)
+                except Exception as grid_exc:
+                    # A grid shader failure must not disable the model renderer.
+                    self._grid_failed = True
+                    self.grid_render_error.emit(str(grid_exc))
         except Exception as exc:
             self._error='Unable to render model: '+str(exc)
             self.render_error.emit(self._error)
@@ -466,6 +504,7 @@ class ModelViewport(QOpenGLWidget):
         else:
             self.yaw-=delta.x()*.008
             self.pitch=max(-1.50,min(1.50,self.pitch+delta.y()*.008))
+        self._axis_indicator.update()
         self.update();event.accept()
 
     def mouseReleaseEvent(self,event):
@@ -495,6 +534,7 @@ class ModelViewport(QOpenGLWidget):
             self.makeCurrent()
             try:
                 self._plate_renderer.release(self._gl)
+                self._world_grid.release(self._gl)
                 if self._influence_texture:
                     self._gl.glDeleteTextures([self._influence_texture]);self._influence_texture=0
                 if self._vbo:self._gl.glDeleteBuffers(1,[self._vbo]);self._vbo=0

@@ -21,17 +21,21 @@ uniform mat4 projectionView;
 uniform vec3 plateOffset;
 out vec3 vNormal;
 out vec2 vUV;
+out vec3 vLocalPosition;
 void main() {
     gl_Position = projectionView * vec4(position + plateOffset, 1.0);
     vNormal = normal;
     vUV = uv;
+    vLocalPosition = position;
 }
 '''
 FRAGMENT_SHADER = '''#version 330 core
 in vec3 vNormal;
 in vec2 vUV;
+in vec3 vLocalPosition;
 uniform sampler2D surfaceArt;
 uniform int hasArt;
+uniform int showGrid;
 out vec4 fragColor;
 void main() {
     float shade = 0.68 + 0.24 * abs(dot(normalize(vNormal), normalize(vec3(.33, -.4, .85))));
@@ -39,6 +43,25 @@ void main() {
     if (hasArt != 0) {
         vec4 art = texture(surfaceArt, vUV);
         base = mix(base, art.rgb, art.a * .90);
+    }
+    // Procedural millimeter grid; stays on the surface of the installed STL.
+    // No second coplanar mesh, so no z-fighting with vendor geometry.
+    if (showGrid != 0 && normalize(vNormal).z > 0.60) {
+        vec2 minorCell = vLocalPosition.xy / 10.0;
+        vec2 majorCell = vLocalPosition.xy / 50.0;
+        vec2 minorDelta = abs(fract(minorCell - 0.5) - 0.5);
+        vec2 majorDelta = abs(fract(majorCell - 0.5) - 0.5);
+        vec2 minorFw = max(fwidth(minorCell), vec2(0.0001));
+        vec2 majorFw = max(fwidth(majorCell), vec2(0.0001));
+        float thin = 1.0 - smoothstep(0.40, 1.15,
+            min(minorDelta.x / minorFw.x, minorDelta.y / minorFw.y));
+        float bold = 1.0 - smoothstep(0.45, 1.30,
+            min(majorDelta.x / majorFw.x, majorDelta.y / majorFw.y));
+        // Fade sub-pixel intervals when far from the bed to avoid moire.
+        float fade = 1.0 - smoothstep(0.30, 0.90,
+            max(minorFw.x, minorFw.y));
+        float strength = clamp((0.25 * thin + 0.43 * bold) * fade, 0.0, 0.64);
+        base = mix(base, vec3(0.52, 0.58, 0.63), strength);
     }
     fragColor = vec4(base * shade, 1.0);
 }
@@ -92,6 +115,7 @@ class PlateGpuRenderer:
         self.texture_path = None
         self.program = self.vao = self.vbo = self.texture = 0
         self.dirty = True
+        self.grid_enabled = False  # Uniform only; never rebuild the STL VBO.
         self._bound_context = None
 
     def set_plate(self, mesh, texture=None):
@@ -166,6 +190,8 @@ class PlateGpuRenderer:
                               1, gl.GL_TRUE, array('f', mvp.copyDataTo()).tobytes())
         gl.glUniform3f(gl.glGetUniformLocation(self.program, 'plateOffset'), *offset)
         gl.glUniform1i(gl.glGetUniformLocation(self.program, 'hasArt'), int(bool(self.texture)))
+        gl.glUniform1i(gl.glGetUniformLocation(self.program, 'showGrid'),
+                       int(self.grid_enabled))
         if self.texture:
             gl.glActiveTexture(gl.GL_TEXTURE1)
             gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture)
