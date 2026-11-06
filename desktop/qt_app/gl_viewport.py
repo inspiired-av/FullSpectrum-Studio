@@ -8,6 +8,8 @@ from __future__ import annotations
 from array import array
 from desktop.qt_app.preview_shading import flatten_faces as _flatten_faces
 from desktop.qt_app.preview_stage6a import classify_model_drop
+from desktop.qt_app.plate_gl import PlateGpuRenderer
+from desktop.qt_app.plate_mesh import plate_offset, scene_clip_planes
 import ctypes
 import math
 
@@ -136,6 +138,7 @@ class ModelViewport(QOpenGLWidget):
     background_clicked = Signal()
     model_file_dropped = Signal(str)
     drop_feedback = Signal(str)
+    plate_render_error = Signal(str)
 
     def __init__(self,parent=None):
         super().__init__(parent)
@@ -154,6 +157,7 @@ class ModelViewport(QOpenGLWidget):
         self._mesh=None;self._data=None;self._dirty=False;self._verts=0
         self._gl=None;self._program=0;self._vao=0;self._vbo=0;self._error=''
         self._influence_data=None;self._influence_texture=0;self._influence_dirty=False
+        self._plate_renderer = PlateGpuRenderer()  # Own GL objects; never part of model buffers.
         self._influence_display='physical';self._influence_selected=0
         self._last=None;self._drag_button=None
         self._press_position=None
@@ -184,6 +188,11 @@ class ModelViewport(QOpenGLWidget):
     def clear_mesh(self):
         self.set_mesh(None)
         self.set_highlights(None, ())
+
+    def set_plate(self, plate_mesh, texture_path=None):
+        """Swap visual plate assets without touching the model mesh, camera or exports."""
+        self._plate_renderer.set_plate(plate_mesh, texture_path)
+        self.update()
 
     def set_highlights(self, selected=None, protected=()):
         # Shader uniforms avoid rebuilding the entire mesh when colors change.
@@ -237,6 +246,15 @@ class ModelViewport(QOpenGLWidget):
         if self._mesh:
             x0,y0,z0,x1,y1,z1=self._mesh.bounds
             self._center=((x0+x1)/2,(y0+y1)/2,(z0+z1)/2)
+            # Reset/Fit explicitly frames the *visual* plate too, if displayed.
+            plate = self._plate_renderer.mesh
+            if plate is not None:
+                a,b,c,d,e,f = plate.bounds
+                ox,oy,oz = plate_offset(self._mesh.bounds, plate.bounds)
+                combined = (min(x0,a+ox),min(y0,b+oy),min(z0,c+oz),
+                            max(x1,d+ox),max(y1,e+oy),max(z1,f+oz))
+                x0,y0,z0,x1,y1,z1 = combined
+                self._center=((x0+x1)/2,(y0+y1)/2,(z0+z1)/2)
             self._radius=max(math.dist((x0,y0,z0),(x1,y1,z1))/2,0.01)
         self.update()
 
@@ -300,6 +318,10 @@ class ModelViewport(QOpenGLWidget):
                       max(1,int(self.height()*self.devicePixelRatioF())))
         gl.glClearColor(.059,.071,.086,1.)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT|gl.GL_DEPTH_BUFFER_BIT)
+        # Hide releases old plate GPU objects on the next draw, not through a
+        # synchronous makeCurrent() call that could flicker on HDR displays.
+        if self._plate_renderer.mesh is None and self._plate_renderer.program:
+            self._plate_renderer.release(gl)
         if self._error or not self._mesh or not self._verts:return
         try:
             if self._dirty:self._upload()
@@ -316,6 +338,12 @@ class ModelViewport(QOpenGLWidget):
             view=QMatrix4x4();view.lookAt(eye,target,QVector3D(0,0,1))
             projection=QMatrix4x4()
             near,far=_camera_clip_planes(radius,eye_distance)
+            plate_mesh = self._plate_renderer.mesh
+            if plate_mesh is not None and self._mesh is not None:
+                near,far=scene_clip_planes(
+                    (eye.x(),eye.y(),eye.z()), self._mesh.bounds,
+                    plate_mesh.bounds, (near,far),
+                    (target.x(),target.y(),target.z()))
             projection.perspective(45.,max(0.01,self.width()/max(1,self.height())), near,far)
             mvp=projection*view
             gl.glUseProgram(self._program)
@@ -360,6 +388,15 @@ class ModelViewport(QOpenGLWidget):
             gl.glDrawArrays(gl.GL_TRIANGLES,0,self._verts)
             if self.wireframe:gl.glPolygonMode(gl.GL_FRONT_AND_BACK,gl.GL_FILL)
             gl.glBindVertexArray(0);gl.glUseProgram(0)
+            plate = self._plate_renderer.mesh
+            if plate is not None:
+                try:
+                    self._plate_renderer.draw(gl, mvp,
+                        plate_offset(self._mesh.bounds, plate.bounds))
+                except Exception as plate_exc:
+                    # A bad vendor texture/GL resource must not poison model rendering.
+                    self._plate_renderer.set_plate(None)
+                    self.plate_render_error.emit(str(plate_exc))
         except Exception as exc:
             self._error='Unable to render model: '+str(exc)
             self.render_error.emit(self._error)
@@ -457,6 +494,7 @@ class ModelViewport(QOpenGLWidget):
         if self._gl and self.context() and self.context().isValid():
             self.makeCurrent()
             try:
+                self._plate_renderer.release(self._gl)
                 if self._influence_texture:
                     self._gl.glDeleteTextures([self._influence_texture]);self._influence_texture=0
                 if self._vbo:self._gl.glDeleteBuffers(1,[self._vbo]);self._vbo=0

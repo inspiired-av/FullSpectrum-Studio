@@ -30,6 +30,9 @@ class ResultsTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._export_resize_timer = QTimer(self)
+        self._export_resize_timer.setSingleShot(True)
+        self._export_resize_timer.timeout.connect(self._notify_export_viewport_width)
         self._events = []
         self._report_path = None
         self._report_content = ''
@@ -304,7 +307,21 @@ class ResultsTab(QWidget):
         self.diagnostics_stack.setFixedHeight(target)
 
     def _notify_export_viewport_width(self):
-        self.export_viewport_resized.emit(self.content_scroll.viewport().width())
+        import shiboken6
+        if not shiboken6.isValid(self):
+            return
+        try:
+            if not shiboken6.isValid(self.content_scroll):
+                return
+            viewport = self.content_scroll.viewport()
+            if viewport is None or not shiboken6.isValid(viewport):
+                return
+            self.export_viewport_resized.emit(viewport.width())
+        except RuntimeError:
+            return  # Parent is already being destroyed during test teardown.
+
+    def stop_deferred_ui(self):
+        self._export_resize_timer.stop()
 
     def eventFilter(self, watched, event):
         if (watched is self.content_scroll.viewport()
@@ -312,7 +329,7 @@ class ResultsTab(QWidget):
                 and hasattr(self, 'diagnostics_stack')):
             self._fit_diagnostics_height()
             # Emit after layout settles to avoid reentrant grid reflow.
-            QTimer.singleShot(0, self._notify_export_viewport_width)
+            self._export_resize_timer.start(0)
         return super().eventFilter(watched, event)
 
     def _select_diagnostics(self, mode):

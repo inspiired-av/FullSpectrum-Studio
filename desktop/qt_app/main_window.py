@@ -8,12 +8,13 @@ import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QEvent, QTimer, QSignalBlocker
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QIcon
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QScrollArea, QSlider, QSplitter, QTabWidget,
     QLineEdit, QCheckBox, QToolButton, QMessageBox, QMenu, QFormLayout,
     QVBoxLayout, QGridLayout, QLayout, QWidget, QSizePolicy, QProgressBar,
+    QDialog,
     QStackedWidget, QRadioButton,
 )
 
@@ -26,6 +27,16 @@ from desktop.qt_app.plan_preferences import (
 from desktop.qt_app.filaments_tab import FilamentsTab
 from desktop.qt_app.gl_viewport import ModelViewport
 from desktop.qt_app.preview_chrome import PreviewChrome
+from desktop.qt_app.plate_ui import PlateCatalogWorker, PlateLoadWorker, PlatePickerDialog
+from desktop.qt_app.plate_toolbar_icons import plate_eye_icon
+from desktop.qt_app.preview_toolbar_icons import preview_toolbar_icon
+from desktop.qt_app.preview_mode_combo import ModernPreviewComboBox
+from desktop.qt_app.preview_toolbar import (
+    AdaptivePreviewToolbar, make_preview_group, separator as preview_toolbar_separator,
+)
+from desktop.qt_app.plate_workspace import (workspace_path, read_workspace,
+    write_workspace, find_default_plate)
+from desktop.qt_app.plate_catalog import _profile_root
 from desktop.qt_app.preview_worker import ModelLoadWorker
 from desktop.qt_app.forecast_worker import ForecastWorker
 from desktop.qt_app.export_worker import ExportWorker
@@ -135,13 +146,41 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("FullSpectrum Studio — Qt")
         self.resize(1440, 880)
         self.setMinimumSize(920, 630)
+        self._qt_disposing = False
+        self._initial_filament_ui_timer = QTimer(self)
+        self._initial_filament_ui_timer.setSingleShot(True)
+        self._initial_filament_ui_timer.timeout.connect(self._initialize_filament_setup)
+        self._initial_export_layout_timer = QTimer(self)
+        self._initial_export_layout_timer.setSingleShot(True)
+        self._initial_export_layout_timer.timeout.connect(self._update_export_layout)
+        self._plate_catalog = None
+        self._plate_catalog_task = None
+        self._plate_load_threads = []
+        self._plate_custom_roots = []
+        self._plate_custom_exes = []  # User-located slicers, no execution.
+        self._plate_rescan_pending = False
+        self._plate_pending_picker = False
+        self._plate_selected = None
+        self._plate_load_serial = 0
+        self._plate_settings_path = workspace_path(settings_path)
+        self._plate_workspace = read_workspace(self._plate_settings_path)
+        self._plate_default = self._plate_workspace.get('default')
+        self._plate_default_pending = self._plate_default is not None
+        self._plate_visible = self._plate_workspace.get('visible', True)
+        self._plate_loaded_mesh = None
+        self._plate_manually_requested_source = None
+        self._plate_custom_exes = [Path(p) for p in self._plate_workspace.get('slicer_executables', []) if Path(p).is_file()]
+        self._plate_custom_roots = [Path(p) for p in self._plate_workspace.get('resource_roots', []) if Path(p).is_dir()]
         self._build()
         # Connect after the viewport and its overlay exist. These signals also
         # handle automatic timer restarts and pauses from staged filament edits.
         self._forecast_timer.armed.connect(self._show_auto_forecast_countdown)
         self._forecast_timer.disarmed.connect(self._hide_auto_forecast_countdown)
         self._build_menus()
-        QTimer.singleShot(0, self._initialize_filament_setup)
+        if self._plate_default_pending:
+            # Lazy background discovery only for users who saved a plate.
+            QTimer.singleShot(0, self._refresh_plate_catalog)
+        self._initial_filament_ui_timer.start(0)
         self.statusBar().showMessage(
             "Qt Stage 4D-D3 — staged filament edits and explicit forecast updates."
         )
@@ -214,44 +253,96 @@ class MainWindow(QMainWindow):
         pane.setObjectName("previewCard")
         pane.setMinimumWidth(430)
         content = _column(pane, spacing=12)
-        row = QHBoxLayout()
-        row.addWidget(_label("MODEL PREVIEW", "smallTitle"))
-        row.addStretch()
-        self.preview_mode = WheelSafeComboBox()
+        # The model view is a selection; specialized import lives in an
+        # overflow menu, not in a permanently visible main action button.
+        self.preview_mode = ModernPreviewComboBox()
         self.preview_mode.addItems(["Original", "Predicted", "Color Loss", "Anchor Influence", "Wireframe"])
-        # Show all modes in the standard windowed Qt popup, including disabled
-        # modes (disabled modes indicate analysis has not been generated).
         self.preview_mode.setMaxVisibleItems(self.preview_mode.count())
         self.preview_mode.setCurrentText("Original")
         self.preview_mode.setObjectName("previewMode")
+        self.preview_mode.setMinimumWidth(145)
         self.preview_mode.setEnabled(False)
-        self.preview_mode.setToolTip("Original, predicted colors, color-loss heatmap, and anchor influence from the current plan-only forecast. Wireframe retains original geometry.")
+        self.preview_mode.setToolTip(
+            "Original, predicted colors, color-loss heatmap, anchor influence, or wireframe. "
+            "The analysis views come from the current read-only forecast.")
         self.preview_mode.currentTextChanged.connect(self._preview_mode_changed)
-        row.addWidget(self.preview_mode)
-        # Explain every view without bringing back the unnecessary heading glyph.
         self.preview_mode_help = SectionHelpButton('preview_modes')
-        row.addWidget(self.preview_mode_help)
-        self.load_predicted_button = QPushButton('Load Predicted…')
-        self.load_predicted_button.setObjectName('loadPredictedButton')
-        self.load_predicted_button.setToolTip('Load an existing FullSpectrum predicted .obj with its matching .mtl. Does not run a conversion.')
-        self.load_predicted_button.setEnabled(False)
-        self.load_predicted_button.clicked.connect(self._open_predicted)
-        row.addWidget(self.load_predicted_button)
-        self.reset_camera_button = QPushButton("Reset View")
-        self.reset_camera_button.setObjectName("resetCameraButton")
-        self.reset_camera_button.setEnabled(False)
-        self.reset_camera_button.clicked.connect(self._reset_camera)
-        compact_icon_button(self.reset_camera_button, 'reset', 'Reset camera to default view (R)', side=32)
+        self.preview_options_button = QToolButton()
+        self.preview_options_button.setObjectName('previewOptionsButton')
+        self.preview_options_button.setIcon(preview_toolbar_icon('more'))
+        self.preview_options_button.setIconSize(QSize(19, 19))
+        self.preview_options_button.setFixedSize(32, 32)
+        self.preview_options_button.setToolTip('Preview options')
+        self.preview_options_button.setAccessibleName('Preview options')
+        self.preview_options_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.preview_options_menu = QMenu(self.preview_options_button)
+        self.preview_import_action = self.preview_options_menu.addAction('Import Predicted OBJ…')
+        self.preview_import_action.setObjectName('importPredictedObjAction')
+        self.preview_import_action.setToolTip('Import an existing OBJ with MTL colors; does not run a forecast.')
+        self.preview_import_action.triggered.connect(self._open_predicted)
+        self.preview_options_menu.addSeparator()
+        self.preview_use_live_action = self.preview_options_menu.addAction('Use Live Forecast Prediction')
+        self.preview_use_live_action.setCheckable(True)
+        self.preview_use_live_action.triggered.connect(self._use_live_predicted_preview)
+        self.preview_use_imported_action = self.preview_options_menu.addAction('Use Imported OBJ Prediction')
+        self.preview_use_imported_action.setCheckable(True)
+        self.preview_use_imported_action.triggered.connect(self._use_imported_predicted_preview)
+        self.preview_options_menu.aboutToShow.connect(self._update_preview_options)
+        self.preview_options_button.setMenu(self.preview_options_menu)
+        self.preview_options_button.hide()  # No model: nothing to import.
+        self.preview_view_group = make_preview_group(
+            self.preview_mode, self.preview_mode_help, self.preview_options_button,
+            name='visualization')
+
+        self.plate_button = QPushButton('Build Plate')
+        self.plate_button.setObjectName('buildPlateButton')
+        self.plate_button.setIcon(export_icon('plate'))
+        self.plate_button.setIconSize(QSize(17, 17))
+        self.plate_button.setMinimumHeight(32)
+        self.plate_button.setToolTip('Choose a 3D build plate from installed slicers')
+        self.plate_button.setAccessibleName('Choose build plate')
+        self.plate_button.clicked.connect(self._choose_plate)
+        self.plate_visibility_button = QToolButton()
+        self.plate_visibility_button.setObjectName('plateVisibilityButton')
+        self.plate_visibility_button.setFixedSize(32, 32)
+        self.plate_visibility_button.setCheckable(True)
+        self.plate_visibility_button.setIcon(plate_eye_icon(False))
+        self.plate_visibility_button.setIconSize(QSize(19, 19))
+        self.plate_visibility_button.setToolTip('Show or hide the selected build plate')
+        self.plate_visibility_button.setAccessibleName('Show build plate')
+        self.plate_visibility_button.clicked.connect(self._toggle_plate_visibility)
+        self.preview_plate_group = make_preview_group(
+            self.plate_button, preview_toolbar_separator(), self.plate_visibility_button,
+            name='build_plate')
+
         self.expand_preview_toggle = QToolButton()
         self.expand_preview_toggle.setObjectName('toggleExpandedPreview')
-        compact_icon_button(self.expand_preview_toggle, 'fullscreen',
-                            'Expand model preview (F11)', side=32)
+        self.expand_preview_toggle.setFixedSize(34, 32)
+        self.expand_preview_toggle.setIcon(preview_toolbar_icon('expand'))
+        self.expand_preview_toggle.setIconSize(QSize(20, 20))
+        self.expand_preview_toggle.setToolTip('Expand model preview (F11)')
+        self.expand_preview_toggle.setAccessibleName('Expand model preview')
         self.expand_preview_toggle.setCheckable(True)
         self.expand_preview_toggle.toggled.connect(self._set_expanded_preview)
-        # Fullscreen first; separate camera reset immediately to its right.
-        row.insertWidget(row.indexOf(self.reset_camera_button), self.expand_preview_toggle)
-        row.addWidget(self.reset_camera_button)
-        content.addLayout(row)
+        self.reset_camera_button = QToolButton()
+        self.reset_camera_button.setObjectName('resetCameraButton')
+        self.reset_camera_button.setFixedSize(34, 32)
+        self.reset_camera_button.setIcon(preview_toolbar_icon('reset'))
+        self.reset_camera_button.setIconSize(QSize(20, 20))
+        self.reset_camera_button.setToolTip('Reset camera to default view (R)')
+        self.reset_camera_button.setAccessibleName('Reset camera')
+        self.reset_camera_button.setEnabled(False)
+        self.reset_camera_button.clicked.connect(self._reset_camera)
+        self.preview_camera_group = make_preview_group(
+            self.expand_preview_toggle, preview_toolbar_separator(), self.reset_camera_button,
+            name='camera')
+
+        self.preview_toolbar = AdaptivePreviewToolbar(
+            _label('MODEL PREVIEW', 'smallTitle'),
+            self.preview_view_group, self.preview_plate_group, self.preview_camera_group)
+        content.addWidget(self.preview_toolbar)
+        self._update_plate_actions()
+        self._update_preview_options()
         # A vertical splitter makes palette inspection adjustable without taking
         # permanent space from the model. Both panes remain real Qt widgets.
         self.preview_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -268,6 +359,7 @@ class MainWindow(QMainWindow):
         self.preview_chrome = PreviewChrome(self.preview_surface)
         self.preview_surface.drop_feedback.connect(self.preview_chrome.set_drop_message)
         self.preview_surface.render_error.connect(self._preview_render_error)
+        self.preview_surface.plate_render_error.connect(self._plate_render_failed)
         self.preview_surface.background_clicked.connect(self._clear_palette_selection)
         model_layout.addWidget(self.preview_surface, stretch=1)
         self.preview_status = _label("Open a 3MF, OBJ or GLB model to view its geometry.", "helpText", wrap=True)
@@ -480,8 +572,8 @@ class MainWindow(QMainWindow):
             sizes = getattr(self, '_palette_split_before_expand', None)
             if sizes and all(sizes):
                 QTimer.singleShot(0, lambda values=list(sizes): self.preview_splitter.setSizes(values))
-        self.expand_preview_toggle.setIcon(export_icon(
-            'fullscreen-exit' if expanded else 'fullscreen'))
+        self.expand_preview_toggle.setIcon(preview_toolbar_icon(
+            'restore' if expanded else 'expand'))
         label = ('Restore workspace (Esc or F11)' if expanded
                  else 'Expand model preview (F11)')
         self.expand_preview_toggle.setToolTip(label)
@@ -529,7 +621,7 @@ class MainWindow(QMainWindow):
         self.results_panel.show_export_folder_requested.connect(self._show_export_folder)
         self.results_panel.attach_export_panels(self.export_settings_panel, self.export_action_panel)
         self.results_panel.export_viewport_resized.connect(self._update_export_layout)
-        QTimer.singleShot(0, self._update_export_layout)
+        self._initial_export_layout_timer.start(0)
         # Single source of truth for validated output actions, on the Export tab.
         self.open_export_button = self.results_panel.open_export_button
         self.export_folder_button = self.results_panel.export_folder_button
@@ -923,12 +1015,28 @@ class MainWindow(QMainWindow):
         grid.invalidate()
         self.export_settings_panel.updateGeometry()
 
+    def _qt_widgets_alive(self, *widgets):
+        """Avoid callbacks on deleted C++ children during test teardown."""
+        import shiboken6
+        if getattr(self, '_qt_disposing', False) or not shiboken6.isValid(self):
+            return False
+        return all(w is not None and shiboken6.isValid(w) for w in widgets)
+
     def _update_export_layout(self, viewport_width=None):
         """Qt viewport width determines whether Export is one or two columns."""
-        if not hasattr(self, 'results_panel'):
+        if not hasattr(self, 'results_panel') or not self._qt_widgets_alive(self.results_panel):
             return
-        if not isinstance(viewport_width, int):
-            viewport_width = self.results_panel.content_scroll.viewport().width()
+        try:
+            scroll = self.results_panel.content_scroll
+            if not self._qt_widgets_alive(scroll):
+                return
+            viewport = scroll.viewport()
+            if not self._qt_widgets_alive(viewport):
+                return
+            if not isinstance(viewport_width, int):
+                viewport_width = viewport.width()
+        except RuntimeError:  # A Qt C++ child may already be gone during teardown.
+            return
         # The scroll-page has 12px margins on both sides. A roomy breakpoint
         # prevents two-column size hints from exceeding available width.
         available = viewport_width - 24
@@ -1682,6 +1790,8 @@ class MainWindow(QMainWindow):
         )
 
     def _initialize_filament_setup(self):
+        if not self._qt_widgets_alive(getattr(self, "filaments_panel", None)):
+            return
         # Returning users should not need to open Filaments manually, but the
         # source must finish loading before any forecast starts.
         if self._saved_filament_source:
@@ -1689,6 +1799,8 @@ class MainWindow(QMainWindow):
         self._refresh_filament_setup_ui()
 
     def _refresh_filament_setup_ui(self):
+        if not self._qt_widgets_alive(getattr(self, "filament_setup_banner", None)):
+            return None
         decision = self._filament_decision()
         need_setup = not decision.ready
         self.filament_setup_banner.setVisible(need_setup)
@@ -1903,13 +2015,298 @@ class MainWindow(QMainWindow):
         view.addAction(fullscreen)
         self.addAction(fullscreen)  # Active even while the menu bar is hidden.
 
+    def _save_plate_workspace(self):
+        """Persist preview-only state, separate from export/filament settings."""
+        state = dict(self._plate_workspace)
+        if self._plate_default is None:
+            state.pop('default', None)
+        else:
+            state['default'] = dict(self._plate_default)
+        state['visible'] = self._plate_visible
+        state['slicer_executables'] = [str(p) for p in self._plate_custom_exes]
+        state['resource_roots'] = [str(p) for p in self._plate_custom_roots]
+        try:
+            write_workspace(self._plate_settings_path, state)
+            self._plate_workspace = state
+        except OSError as exc:
+            self.statusBar().showMessage('Unable to save preview plate settings: ' + str(exc))
+
+    def _update_plate_actions(self):
+        if not hasattr(self, 'plate_visibility_button'):
+            return
+        selected = self._plate_selected
+        showing = bool(selected is not None and self._plate_visible)
+        self.plate_visibility_button.setEnabled(selected is not None)
+        self.plate_visibility_button.setChecked(showing)
+        self.plate_visibility_button.setIcon(plate_eye_icon(showing))
+        label = 'Hide build plate' if showing else 'Show build plate'
+        self.plate_visibility_button.setAccessibleName(label)
+        self.plate_visibility_button.setToolTip(
+            f'{label}: {selected.label}' if selected is not None
+            else 'Choose a build plate to enable visibility')
+        self.plate_button.setToolTip('Choose a build plate from installed slicers')
+
+    def _set_plate_visible(self, visible):
+        """A cheap hide/show that retains the selected printer and loaded STL."""
+        if self._plate_selected is None:
+            return
+        self._plate_visible = bool(visible)
+        if self._plate_visible and self._plate_loaded_mesh is not None:
+            self.preview_surface.set_plate(self._plate_loaded_mesh,
+                                           self._plate_selected.texture)
+        else:
+            self.preview_surface.set_plate(None)
+        self._update_plate_actions()
+        self._save_plate_workspace()
+        self.statusBar().showMessage(
+            ('Showing ' if self._plate_visible else 'Hiding ') +
+            self._plate_selected.label + ' · model unchanged')
+
+    def _toggle_plate_visibility(self):
+        if self._plate_selected is None:
+            self._choose_plate()
+            return
+        self._set_plate_visible(not self._plate_visible)
+
+    def _make_selected_plate_default(self):
+        asset = self._plate_selected
+        if asset is None:
+            return
+        self._plate_default = dict(printer=asset.printer, vendor=asset.vendor,
+                                   source=asset.source)
+        self._plate_default_pending = False
+        self._save_plate_workspace()
+        self.statusBar().showMessage('Default 3D build plate saved: ' + asset.label)
+
+    def _clear_plate_default(self):
+        """Forget the default AND remove its currently displayed plate.
+
+        A clear request should not leave a session plate visible or let a
+        previously launched async plate worker restore it later. The original
+        model, forecast, and camera remain untouched.
+        """
+        self._plate_default = None
+        self._plate_default_pending = False
+        # Invalidate an in-flight plate load before clearing its selection.
+        self._plate_load_serial += 1
+        self._plate_selected = None
+        self._plate_loaded_mesh = None
+        self.preview_surface.set_plate(None)
+        self._update_plate_actions()
+        self._save_plate_workspace()
+        self.statusBar().showMessage('Saved default and displayed build plate cleared.')
+
+    def _refresh_plate_catalog(self):
+        """Discover installed slicer plate profiles without blocking the viewport."""
+        if self._plate_catalog_task is not None:
+            self._plate_rescan_pending = True
+            return
+        self.plate_button.setToolTip('Scanning local slicer build plates…')
+        worker = PlateCatalogWorker(resource_roots=tuple(self._plate_custom_roots),
+                                    slicer_executables=tuple(self._plate_custom_exes),
+                                    parent=self)
+        self._plate_catalog_task = worker
+        worker.completed.connect(self._plate_catalog_ready)
+        worker.finished.connect(lambda t=worker: self._release_plate_catalog(t))
+        worker.start()
+
+    def _plate_catalog_ready(self, catalog, error):
+        if error is not None:
+            self._plate_catalog = None
+            self._plate_pending_picker = False
+            self.plate_button.setToolTip('Build plate discovery unavailable: ' + str(error))
+            self.statusBar().showMessage('Build plate discovery error: ' + str(error))
+            return
+        self._plate_catalog = catalog
+        if self._plate_manually_requested_source and not self._plate_rescan_pending:
+            source = self._plate_manually_requested_source
+            self._plate_manually_requested_source = None
+            if not any(p.source == source for p in catalog.plates):
+                QMessageBox.warning(self, 'No ' + source + ' Build Plates',
+                    source + ' was located, but no usable STL printer profiles were discovered. '
+                    'Use Build Plate → Choose Profile Folder and select its resources/profiles directory, '
+                    'then refresh the catalog. No files were modified.')
+        count = len(catalog.plates)
+        from collections import Counter
+        by_source = Counter(asset.source for asset in catalog.plates)
+        source_text = ', '.join(f'{source}: {n}' for source, n in sorted(by_source.items()))
+        self.plate_button.setToolTip(f'Build Plate · {count} profiles · {source_text or "No slicer assets found"}')
+        # When rescanning, do not show the stale catalog first.
+        if self._plate_default_pending and not self._plate_rescan_pending:
+            self._plate_default_pending = False
+            preferred = find_default_plate(catalog, self._plate_default)
+            if preferred is not None:
+                self._select_plate_asset(preferred, preserve_visibility=True)
+            elif self._plate_default:
+                self.statusBar().showMessage('Saved default plate not found in installed slicers.')
+        if self._plate_pending_picker and not self._plate_rescan_pending:
+            self._plate_pending_picker = False
+            QTimer.singleShot(0, self._choose_plate)
+
+    def _release_plate_catalog(self, worker):
+        if self._plate_catalog_task is worker:
+            self._plate_catalog_task = None
+        worker.deleteLater()
+        if self._plate_rescan_pending:
+            self._plate_rescan_pending = False
+            QTimer.singleShot(0, self._refresh_plate_catalog)
+
+    def _choose_plate(self):
+        catalog = self._plate_catalog
+        if catalog is None:
+            self._plate_pending_picker = True
+            self._refresh_plate_catalog()
+            return
+        if not catalog.plates:
+            QMessageBox.information(self, 'No Installed Build Plates',
+                'No slicer bed models were discovered. Install OrcaSlicer or Bambu Studio, '
+                'or select an existing resources/profiles folder from the build-plate menu.')
+            return
+        dialog = PlatePickerDialog(catalog.plates, self, saved_default=self._plate_default)
+        # Clear default is an immediate destructive preference action, not a
+        # pending picker selection: Cancel/Close must not undo the clear.
+        # Hook the existing dialog button without altering the picker layout.
+        clear_now = {'done': False}
+
+        def on_clear_default():
+            clear_now['done'] = True
+            self._clear_plate_default()
+            # Clicking OK after Clear must not silently reload the old plate.
+            # Users may still explicitly select another plate afterwards.
+            if hasattr(dialog, 'list') and dialog.list is not None:
+                dialog.list.clearSelection()
+                dialog.list.setCurrentRow(-1)
+            dialog.selected_asset = None
+
+        clear_buttons = [button for button in dialog.findChildren(QPushButton)
+                         if button.text().strip().casefold() == 'clear default']
+        if len(clear_buttons) == 1:
+            clear_buttons[0].setToolTip(
+                'Immediately forget the saved default and remove the displayed plate. '
+                'Closing this dialog does not undo the clear.')
+            clear_buttons[0].clicked.connect(on_clear_default)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Fallback for an older dialog without an exposed clear button.
+        if dialog.clear_saved_default and not clear_now['done']:
+            self._clear_plate_default()
+        # Remember is an intention: without a chosen plate, do not save one.
+        if dialog.selected_asset is not None:
+            self._select_plate_asset(dialog.selected_asset)
+            if dialog.remember_default.isChecked():
+                self._make_selected_plate_default()
+
+    def _choose_plate_slicer_executable(self):
+        """Locate a slicer whose installed resources were missed by autodetection.
+
+        Only read the executable path to locate its neighboring resource folder;
+        this method never executes or modifies the slicer program.
+        """
+        from desktop.slicer_launcher import SLICER_EXECUTABLES
+        filename, _ = QFileDialog.getOpenFileName(
+            self, 'Locate OrcaSlicer or Bambu Studio', '', 'Windows executables (*.exe)')
+        if not filename:
+            return
+        path = Path(filename)
+        recognized = {name.casefold() for names in SLICER_EXECUTABLES.values()
+                      for name in names}
+        if not path.is_file() or path.name.casefold() not in recognized:
+            QMessageBox.warning(self, 'Unsupported Slicer Executable',
+                'Choose the existing OrcaSlicer or Bambu Studio .exe file. '
+                'For a different slicer, use Choose Profile Folder instead.')
+            return
+        if _profile_root(path) is None:
+            QMessageBox.warning(self, 'Slicer Resources Not Found',
+                'The selected executable exists, but no resources/profiles folder '
+                'was found near it. The executable alone does not contain plate STLs. '
+                'Choose Profile Folder and point to OrcaSlicer\\resources\\profiles, '
+                'or run python -m desktop.qt_app.plate_catalog --slicer-exe with this path.')
+            return
+        if path not in self._plate_custom_exes:
+            self._plate_custom_exes.append(path)
+        self._plate_manually_requested_source = next(
+            (source for source, names in SLICER_EXECUTABLES.items()
+             if path.name.casefold() in {n.casefold() for n in names}), None)
+        self._save_plate_workspace()
+        self._plate_pending_picker = True
+        self._refresh_plate_catalog()
+
+    def _choose_plate_profile_folder(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, 'Choose Slicer resources/profiles Folder', '')
+        if not directory:
+            return
+        path = Path(directory)
+        if path not in self._plate_custom_roots:
+            self._plate_custom_roots.append(path)
+        self._save_plate_workspace()
+        self._refresh_plate_catalog()
+
+    def _clear_plate(self):
+        # Legacy menu entry now hides without losing the selected printer.
+        self._set_plate_visible(False)
+
+    def _select_plate_asset(self, asset, *, preserve_visibility=False):
+        self._plate_visible = self._plate_visible if preserve_visibility else True
+        self._plate_loaded_mesh = None
+        self._plate_load_serial += 1
+        serial = self._plate_load_serial
+        self._plate_selected = asset
+        self._update_plate_actions()
+        self.plate_button.setToolTip('Loading 3D build plate: ' + asset.label)
+        worker = PlateLoadWorker(asset.model, parent=self)
+        self._plate_load_threads.append(worker)
+        worker.completed.connect(
+            lambda mesh, error, s=serial, a=asset: self._plate_loaded(s, a, mesh, error))
+        worker.finished.connect(lambda t=worker: self._release_plate_load(t))
+        worker.start()
+
+    def _plate_loaded(self, serial, asset, mesh, error):
+        if serial != self._plate_load_serial or self._plate_selected != asset:
+            return
+        if error or mesh is None:
+            self.preview_surface.set_plate(None)
+            self.plate_button.setToolTip('Build plate unavailable: ' + str(error))
+            self.statusBar().showMessage('Unable to read installed build plate: ' + str(error))
+            return
+        self._plate_loaded_mesh = mesh
+        if self._plate_visible:
+            self.preview_surface.set_plate(mesh, asset.texture)
+            # Choosing a plate is an explicit request to frame the scene.
+            # Subsequent show/hide never changes the camera.
+            if self.preview_surface.mesh is not None:
+                self.preview_surface.reset_camera()
+        else:
+            self.preview_surface.set_plate(None)
+        self._update_plate_actions()
+        self.statusBar().showMessage(
+            f'Loaded {asset.label} · {mesh.faces:,} plate faces · Reset Camera to frame both objects')
+
+    def _release_plate_load(self, worker):
+        if worker in self._plate_load_threads:
+            self._plate_load_threads.remove(worker)
+        worker.deleteLater()
+
+    def _plate_render_failed(self, message):
+        self.plate_button.setToolTip('Build plate renderer unavailable: ' + message)
+        self.statusBar().showMessage('3D build plate unavailable: ' + message)
+
     def _tab_changed(self, index):
         if index == 1:
             self.filaments_panel.on_selected()
         elif index == 2:
             self._refresh_results_context()
 
+    def _qt_widgets_alive_for_shutdown(self, widget):
+        import shiboken6
+        return shiboken6.isValid(self) and shiboken6.isValid(widget)
+
     def closeEvent(self, event):
+        self._qt_disposing = True
+        self._initial_filament_ui_timer.stop()
+        self._initial_export_layout_timer.stop()
+        if hasattr(self, "results_panel") and self._qt_widgets_alive_for_shutdown(self.results_panel):
+            self.results_panel.stop_deferred_ui()
         # Let any 3MF/inventory reads finish so Qt never destroys a live QThread.
         self._forecast_timer.stop()
         self._forecast_heartbeat.stop()
@@ -1917,7 +2314,10 @@ class MainWindow(QMainWindow):
             self._export_task.requestInterruption()
         if self._forecast_task is not None:
             self._forecast_task.requestInterruption()
-        for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + ([self._forecast_task] if self._forecast_task is not None else []) + ([self._export_task] if self._export_task is not None else []):
+        plate_workers = list(self._plate_load_threads)
+        if self._plate_catalog_task is not None:
+            plate_workers.append(self._plate_catalog_task)
+        for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + plate_workers + ([self._forecast_task] if self._forecast_task is not None else []) + ([self._export_task] if self._export_task is not None else []):
             if worker.isRunning():
                 worker.wait()
         super().closeEvent(event)
@@ -1966,7 +2366,8 @@ class MainWindow(QMainWindow):
         self._original_mesh = None
         self._predicted_mesh = None
         self._predicted_filename = ''
-        self.load_predicted_button.setEnabled(False)
+        self.preview_import_action.setEnabled(False)
+        self._update_preview_options()
         self.source_palette_content.setVisible(False)
         self.source_palette_scroll.verticalScrollBar().setValue(0)
         self._source_palette_selected=None
@@ -2020,7 +2421,8 @@ class MainWindow(QMainWindow):
         self._refresh_preview_modes()
         self.preview_mode.setCurrentText('Original')
         self.preview_surface.set_wireframe(False)
-        self.load_predicted_button.setEnabled(True)
+        self.preview_import_action.setEnabled(True)
+        self._update_preview_options()
         self._populate_source_palette(mesh)
         # Populate Protect Solid Colors without making the user scan again.
         # This uses the authoritative engine/native color scanner, not just
@@ -2652,6 +3054,7 @@ class MainWindow(QMainWindow):
         self._influence_data = None
         self.preview_surface.set_influence_analysis(None)
         self._use_external_predicted = False
+        self._update_preview_options()
         if not hasattr(self, 'preview_mode'):
             return
         if self.preview_mode.currentText() in ('Predicted', 'Color Loss', 'Anchor Influence'):
@@ -2682,6 +3085,7 @@ class MainWindow(QMainWindow):
         self.anchor_legend.set_rows(
             anchor_legend_rows(result) if meshes.get('influence') and self._influence_data else ())
         self._refresh_preview_modes()
+        self._update_preview_options()
         if self.preview_mode.currentText() in ('Predicted', 'Color Loss', 'Anchor Influence'):
             if self.preview_mode.currentText() == 'Predicted' and not meshes.get('predicted') and self._predicted_mesh:
                 # A manually loaded external OBJ is still available; never call it live.
@@ -2698,6 +3102,45 @@ class MainWindow(QMainWindow):
         if present:
             self.statusBar().showMessage('Live 3D views available: ' + present)
 
+    def _update_preview_options(self):
+        """Sync an optional menu with the actual model/preview sources."""
+        if not hasattr(self, 'preview_options_button'):
+            return
+        from desktop.qt_app.preview_toolbar_state import preview_options_state
+        available = preview_options_state(
+            self._original_mesh is not None,
+            self._live_preview_meshes.get('predicted') is not None,
+            self._predicted_mesh is not None,
+            self._use_external_predicted)
+        self.preview_options_button.setVisible(available['menu_visible'])
+        self.preview_import_action.setEnabled(available['import_enabled'])
+        self.preview_use_live_action.setVisible(available['sources_visible'])
+        self.preview_use_live_action.setEnabled(available['live_enabled'])
+        self.preview_use_live_action.setChecked(available['live_checked'])
+        self.preview_use_imported_action.setVisible(available['sources_visible'])
+        self.preview_use_imported_action.setEnabled(available['imported_enabled'])
+        self.preview_use_imported_action.setChecked(available['imported_checked'])
+        if hasattr(self, 'preview_toolbar'):
+            self.preview_toolbar.refresh()
+
+    def _use_live_predicted_preview(self):
+        """Select the already-calculated engine mesh; do not run optimization."""
+        if self._original_mesh is None or not self._live_preview_meshes.get('predicted'):
+            return
+        self._use_external_predicted = False
+        self.preview_mode.setCurrentText('Predicted')
+        self._preview_mode_changed('Predicted')
+        self._update_preview_options()
+
+    def _use_imported_predicted_preview(self):
+        """Restore a manually imported OBJ if one has been loaded."""
+        if self._original_mesh is None or self._predicted_mesh is None:
+            return
+        self._use_external_predicted = True
+        self.preview_mode.setCurrentText('Predicted')
+        self._preview_mode_changed('Predicted')
+        self._update_preview_options()
+
     def _open_predicted(self):
         if self._original_mesh is None:return
         path,_=QFileDialog.getOpenFileName(self,'Open Existing Predicted Preview (OBJ)', '', 'Wavefront OBJ (*.obj)')
@@ -2705,7 +3148,7 @@ class MainWindow(QMainWindow):
         self._predicted_serial+=1
         serial=self._predicted_serial
         source=self.state.model_path
-        self.load_predicted_button.setEnabled(False)
+        self.preview_import_action.setEnabled(False)
         self.statusBar().showMessage('Reading saved predicted OBJ and matching MTL…')
         thread=ModelLoadWorker(path,self)
         self._preview_threads.append(thread)
@@ -2716,7 +3159,8 @@ class MainWindow(QMainWindow):
 
     def _predicted_loaded(self,serial,source,path,mesh,error):
         if serial!=self._predicted_serial or source!=self.state.model_path:return
-        self.load_predicted_button.setEnabled(True)
+        self.preview_import_action.setEnabled(True)
+        self._update_preview_options()
         if error:
             self.results_panel.record_event('Saved predicted preview',error,'warning')
             self.statusBar().showMessage('Unable to load saved predicted OBJ: '+error)
@@ -2729,6 +3173,7 @@ class MainWindow(QMainWindow):
         self._predicted_filename = path
         self._use_external_predicted = True
         self._refresh_preview_modes()
+        self._update_preview_options()
         self.preview_mode.setCurrentText('Predicted')
         self._preview_mode_changed('Predicted')
         self.results_panel.record_event('Saved predicted preview',display_filename(path)+' opened (no conversion run).','success')

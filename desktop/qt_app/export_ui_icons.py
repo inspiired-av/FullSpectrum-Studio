@@ -86,6 +86,10 @@ def export_icon(name: str, color='#bcd0dd', size=20) -> QIcon:
     elif name == 'sidebar':
         p.drawRoundedRect(QRectF(3, 4, 18, 16), 2, 2)
         stroke((10, 4), (10, 20))
+    elif name == 'plate':
+        # Low perspective slab: consistent with Export's compact vector styling.
+        stroke((3, 10), (12, 5), (21, 10), (12, 15), (3, 10))
+        stroke((3, 10), (3, 15), (12, 20), (21, 15), (21, 10))
     elif name == 'open':
         stroke((15, 3), (21, 3), (21, 9));stroke((21, 3), (11, 13))
         stroke((19, 13), (19, 20), (4, 20), (4, 5), (11, 5))

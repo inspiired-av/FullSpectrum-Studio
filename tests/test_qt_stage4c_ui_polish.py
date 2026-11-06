@@ -32,7 +32,8 @@ class VisualPolishContractTests(unittest.TestCase):
     def test_preview_help_is_by_mode_selector_not_section_heading(self):
         text = WINDOW.read_text(encoding='utf-8')
         self.assertIn("SectionHelpButton('preview_modes')", text)
-        self.assertIn('row.addWidget(self.preview_mode_help)', text)
+        self.assertIn('self.preview_view_group = make_preview_group(', text)
+        self.assertIn('self.preview_mode, self.preview_mode_help, self.preview_options_button', text)
         self.assertNotIn('help_heading("model_preview"', text)
         self.assertIn("'preview_modes': HelpTopic(", HELP.read_text(encoding='utf-8'))
 

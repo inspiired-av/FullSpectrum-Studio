@@ -110,7 +110,8 @@ class WindowContractTests(unittest.TestCase):
         fn=self.method('_initialize_filament_setup')
         self.assertIn('self._saved_filament_source',fn)
         self.assertIn('self.filaments_panel.load_options()',fn)
-        self.assertIn('QTimer.singleShot(0, self._initialize_filament_setup)',self.code)
+        self.assertIn('self._initial_filament_ui_timer.timeout.connect(self._initialize_filament_setup)', self.code)
+        self.assertIn('self._initial_filament_ui_timer.start(0)', self.code)
 
     def test_first_time_users_can_configure_in_both_tabs(self):
         self.assertIn("setObjectName('configureFilamentsFirstRun')",self.code)

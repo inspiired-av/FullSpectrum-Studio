@@ -23,7 +23,7 @@ def _estimate_sparkle(size=14):
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.scale(size * scale / 24.0, size * scale / 24.0)
+    painter.scale(size / 24.0, size / 24.0)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QColor('#71d7dc'))
     path = QPainterPath()

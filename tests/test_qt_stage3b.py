@@ -125,7 +125,8 @@ class Stage3BWidgetTests(unittest.TestCase):
                 widget._preview_loaded(0,widget.state.model_path,mesh,None)
                 self.assertFalse(widget.source_palette_scroll.isHidden())
                 self.assertIn('source colors',widget.source_palette_message.text())
-                self.assertTrue(widget.load_predicted_button.isEnabled())
+                self.assertTrue(widget.preview_import_action.isEnabled())
+                self.assertFalse(widget.preview_options_button.isHidden())
             finally:widget.close()
 
 if __name__=='__main__':unittest.main()
