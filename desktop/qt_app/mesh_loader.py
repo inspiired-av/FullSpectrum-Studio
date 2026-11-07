@@ -39,6 +39,7 @@ class PreviewMesh:
     color_status: str = "No explicit source colors detected"
     render_buffer: object = field(default=None, compare=False, repr=False)  # prepared off the UI thread
     corner_colors: tuple = ()  # exact (color1,color2,color3) per triangle, for GPU interpolation
+    load_profile: object = field(default=None, compare=False, repr=False)  # preview-only telemetry
 
     @property
     def sampled(self):

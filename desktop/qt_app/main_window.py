@@ -27,6 +27,7 @@ from desktop.qt_app.plan_preferences import (
 from desktop.qt_app.filaments_tab import FilamentsTab
 from desktop.qt_app.gl_viewport import ModelViewport
 from desktop.qt_app.preview_chrome import PreviewChrome
+from desktop.qt_app.preview_performance import format_preview_performance
 from desktop.qt_app.plate_ui import PlateCatalogWorker, PlateLoadWorker, PlatePickerDialog
 from desktop.qt_app.plate_toolbar_icons import plate_eye_icon
 from desktop.qt_app.preview_toolbar_icons import preview_toolbar_icon
@@ -2157,6 +2158,16 @@ class MainWindow(QMainWindow):
         fullscreen.triggered.connect(self.expand_preview_toggle.toggle)
         view.addAction(fullscreen)
         self.addAction(fullscreen)  # Active even while the menu bar is hidden.
+        metrics = QAction('Preview Performance…', self)
+        metrics.setObjectName('previewPerformanceAction')
+        metrics.triggered.connect(self._show_preview_performance)
+        view.addAction(metrics)
+
+    def _show_preview_performance(self):
+        """On-demand display diagnostics; never changes forecast or export."""
+        snapshot=self.preview_surface.preview_performance_snapshot()
+        QMessageBox.information(self, "Preview Performance",
+                                format_preview_performance(snapshot))
 
     def _fit_perspective_grid(self):
         if not self.preview_surface.fit_perspective_grid():

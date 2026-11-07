@@ -17,6 +17,9 @@ from desktop.qt_app.preview_grid_ruler_gl import WorldGridRulerRenderer
 from desktop.qt_app.preview_grid_measurement_overlay import PerspectiveGridMeasurementOverlay
 from desktop.qt_app.preview_axis_indicator import ViewAxisIndicator
 from desktop.qt_app.preview_grid_policy import choose_grid_layers
+from desktop.qt_app.preview_performance import (
+    require_upload_budget, preview_performance_snapshot)
+from time import perf_counter
 from desktop.qt_app.plate_mesh import combined_scene_bounds
 from desktop.qt_app.plate_mesh import plate_offset, scene_clip_planes
 import ctypes
@@ -165,6 +168,8 @@ class ModelViewport(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self._mesh=None;self._data=None;self._dirty=False;self._verts=0
+        self._preview_upload_ms=None;self._preview_upload_bytes=0
+        self._preview_fallback_prepare_ms=None
         self._gl=None;self._program=0;self._vao=0;self._vbo=0;self._error=''
         self._influence_data=None;self._influence_texture=0;self._influence_dirty=False
         self._plate_renderer = PlateGpuRenderer()  # Own GL objects; never part of model buffers.
@@ -193,10 +198,23 @@ class ModelViewport(QOpenGLWidget):
     @property
     def mesh(self):return self._mesh
 
+    def preview_performance_snapshot(self):
+        """Return preview-only timings and memory estimates for UI diagnostics."""
+        return preview_performance_snapshot(
+            self._mesh, upload_submit_ms=self._preview_upload_ms,
+            upload_bytes=self._preview_upload_bytes,
+            fallback_prepare_ms=self._preview_fallback_prepare_ms)
+
     def set_mesh(self,mesh,*,preserve_camera=False):
         self._mesh=mesh
+        self._preview_upload_ms=None
+        self._preview_upload_bytes=0
+        self._preview_fallback_prepare_ms=None
         # Prefer geometry prepared by ModelLoadWorker so the UI remains responsive.
+        prepare_start = perf_counter()
         self._data=(getattr(mesh, 'render_buffer', None) or _flatten_faces(mesh)) if mesh else None
+        if mesh is not None and getattr(mesh, 'render_buffer', None) is None:
+            self._preview_fallback_prepare_ms=(perf_counter()-prepare_start)*1000.0
         self._verts=len(self._data)//12 if self._data is not None else 0
         self._dirty=True
         self._axis_indicator.setVisible(mesh is not None and self._grid_show_axes)
@@ -370,8 +388,18 @@ class ModelViewport(QOpenGLWidget):
         gl=self._gl
         gl.glBindVertexArray(self._vao)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER,self._vbo)
-        data=self._data.tobytes() if self._data is not None else b''
-        gl.glBufferData(gl.GL_ARRAY_BUFFER,len(data),data,gl.GL_STATIC_DRAW)
+        # Borrow the writable float32 array directly. The old tobytes()
+        # path duplicated the entire expanded mesh in Python heap memory.
+        count=len(self._data) if self._data is not None else 0
+        size=count*self._data.itemsize if count else 0
+        require_upload_budget(size)
+        if count and self._data.itemsize != ctypes.sizeof(ctypes.c_float):
+            raise ValueError("Preview render buffer must contain float32 values")
+        pointer=(ctypes.c_float*count).from_buffer(self._data) if count else None
+        upload_start=perf_counter()
+        gl.glBufferData(gl.GL_ARRAY_BUFFER,size,pointer,gl.GL_STATIC_DRAW)
+        self._preview_upload_ms=(perf_counter()-upload_start)*1000.0
+        self._preview_upload_bytes=size
         gl.glEnableVertexAttribArray(0)
         gl.glVertexAttribPointer(0,3,gl.GL_FLOAT,gl.GL_FALSE,48,ctypes.c_void_p(0))
         gl.glEnableVertexAttribArray(1)
