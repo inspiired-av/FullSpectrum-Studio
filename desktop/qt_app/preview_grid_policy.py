@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 
 GRID_MODES = ('automatic', 'plate', 'perspective', 'off')
-DEFAULT_GRID_SETTINGS = {'mode': 'automatic', 'last_mode': 'automatic', 'axes': True}
+DEFAULT_GRID_SETTINGS = {'mode': 'automatic', 'last_mode': 'automatic', 'axes': True, 'measurements': True}
 
 
 def settings_path(plate_workspace_path):
@@ -28,7 +28,9 @@ def normalize_settings(data):
     if last not in GRID_MODES or last == 'off':
         last = mode if mode != 'off' else 'automatic'
     axes = data.get('axes', True)
-    return {'mode': mode, 'last_mode': last, 'axes': axes is not False}
+    measurements = data.get('measurements', True)
+    return {'mode': mode, 'last_mode': last, 'axes': axes is not False,
+            'measurements': measurements is not False}
 
 
 def read_grid_settings(path):

@@ -8,7 +8,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
-_VALID = frozenset({'expand', 'restore', 'reset', 'more', 'grid'})
+_VALID = frozenset({'expand', 'restore', 'reset', 'more', 'grid', 'chevron-down'})
 
 
 def preview_toolbar_icon(name: str, color: str = '#d1dfe8') -> QIcon:
@@ -62,6 +62,10 @@ def preview_toolbar_icon(name: str, color: str = '#d1dfe8') -> QIcon:
         painter.drawLine(QPointF(14.3, 5), QPointF(14.3, 19))
         painter.drawLine(QPointF(5, 9.7), QPointF(19, 9.7))
         painter.drawLine(QPointF(5, 14.3), QPointF(19, 14.3))
+    elif name == 'chevron-down':
+        # Same rounded stroke and color as the other viewport toolbar icons.
+        painter.drawLine(QPointF(6, 9), QPointF(12, 15))
+        painter.drawLine(QPointF(12, 15), QPointF(18, 9))
     else:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(color))

@@ -64,7 +64,7 @@ class GridPolicyTests(unittest.TestCase):
             prefs = policy.settings_path(plate)
             self.assertEqual(prefs.name, 'preview_grid.json')
             self.assertEqual(policy.read_grid_settings(prefs), policy.DEFAULT_GRID_SETTINGS)
-            data = {'mode': 'plate', 'last_mode': 'plate', 'axes': False}
+            data = {'mode': 'plate', 'last_mode': 'plate', 'axes': False, 'measurements': True}
             policy.write_grid_settings(prefs, data)
             self.assertEqual(policy.read_grid_settings(prefs), data)
             self.assertEqual(plate.read_text(encoding='utf-8'), '{"visible": false}')
@@ -141,7 +141,7 @@ class GridIntegrationContracts(unittest.TestCase):
 
     def test_toolbar_and_preview_options_are_independent_of_plate_eye(self):
         self.assertIn("setObjectName('previewGridButton')", self.main)
-        self.assertIn("self.preview_grid_menu = self.preview_options_menu.addMenu('Grid and Axes')", self.main)
+        self.assertIn("self.preview_grid_menu = QMenu('Grid and Axes', self)", self.main)
         self.assertIn('self.plate_visibility_button.clicked.connect(self._toggle_plate_visibility)', self.main)
         self.assertIn('self.preview_grid_button.toggled.connect(self._toggle_preview_grid)', self.main)
         self.assertIn('self._grid_settings_path = preview_grid_settings_path(', self.main)

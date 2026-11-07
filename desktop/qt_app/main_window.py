@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QToolButton, QMessageBox, QMenu, QFormLayout,
     QVBoxLayout, QGridLayout, QLayout, QWidget, QSizePolicy, QProgressBar,
     QDialog,
-    QStackedWidget, QRadioButton,
+    QStackedWidget, QRadioButton, QInputDialog,
 )
 
 from desktop.app_support import APP_VERSION
@@ -30,6 +30,11 @@ from desktop.qt_app.preview_chrome import PreviewChrome
 from desktop.qt_app.plate_ui import PlateCatalogWorker, PlateLoadWorker, PlatePickerDialog
 from desktop.qt_app.plate_toolbar_icons import plate_eye_icon
 from desktop.qt_app.preview_toolbar_icons import preview_toolbar_icon
+from desktop.qt_app.model_open_location import (
+    location_path as model_location_path, read_location as read_model_location,
+    write_location as write_model_location, initial_directory as initial_model_directory,
+    with_default_folder, with_last_opened_model,
+)
 from desktop.qt_app.preview_grid_policy import (
     read_grid_settings, write_grid_settings, settings_path as preview_grid_settings_path,
     set_grid_mode as change_grid_mode, toggle_grid as toggle_grid_setting,
@@ -171,6 +176,8 @@ class MainWindow(QMainWindow):
         self._plate_workspace = read_workspace(self._plate_settings_path)
         self._grid_settings_path = preview_grid_settings_path(self._plate_settings_path)
         self._grid_settings = read_grid_settings(self._grid_settings_path)
+        self._model_location_path = model_location_path(self._plate_settings_path)
+        self._model_location = read_model_location(self._model_location_path)
         self._plate_default = self._plate_workspace.get('default')
         self._plate_default_pending = self._plate_default is not None
         self._plate_visible = self._plate_workspace.get('visible', True)
@@ -296,9 +303,8 @@ class MainWindow(QMainWindow):
         self.preview_use_imported_action = self.preview_options_menu.addAction('Use Imported OBJ Prediction')
         self.preview_use_imported_action.setCheckable(True)
         self.preview_use_imported_action.triggered.connect(self._use_imported_predicted_preview)
-        # A preview-only submenu, separate from imported prediction sources.
-        self.preview_options_menu.addSeparator()
-        self.preview_grid_menu = self.preview_options_menu.addMenu('Grid and Axes')
+        # Grid configuration belongs to the visible grid control, not prediction overflow.
+        self.preview_grid_menu = QMenu('Grid and Axes', self)
         self.preview_grid_actions = {}
         labels = {'automatic': 'Automatic (recommended)', 'plate': 'Plate Grid',
                   'perspective': 'Perspective Grid', 'off': 'Off'}
@@ -309,9 +315,24 @@ class MainWindow(QMainWindow):
                 lambda checked=False, value=mode: self._set_preview_grid_mode(value))
             self.preview_grid_actions[mode] = action
         self.preview_grid_menu.addSeparator()
+        # Optional camera framing command; never shrink the model on orbit/zoom.
+        self.preview_fit_grid_action = self.preview_grid_menu.addAction('Fit Perspective Grid')
+        self.preview_fit_grid_action.setToolTip(
+            'Frame the entire perspective grid without changing camera direction.')
+        self.preview_fit_grid_action.triggered.connect(self._fit_perspective_grid)
+        self.preview_grid_menu.addSeparator()
         self.preview_axes_action = self.preview_grid_menu.addAction('Show XYZ axis marker')
         self.preview_axes_action.setCheckable(True)
         self.preview_axes_action.toggled.connect(self._set_preview_axes_visible)
+        self.preview_measurements_action = self.preview_grid_menu.addAction(
+            'Show perspective grid measurements')
+        self.preview_measurements_action.setObjectName('perspectiveGridMeasurementsAction')
+        self.preview_measurements_action.setCheckable(True)
+        self.preview_measurements_action.setToolTip(
+            'Perspective grid only: small-cell spacing plus X/Y distances (mm) '
+            'from the first visible major grid line. These are grid-relative '
+            'ruler distances, not world or printer-bed coordinates.')
+        self.preview_measurements_action.toggled.connect(self._set_preview_measurements_visible)
         self.preview_grid_menu.aboutToShow.connect(self._refresh_preview_grid_actions)
         self.preview_options_menu.aboutToShow.connect(self._update_preview_options)
         self.preview_options_button.setMenu(self.preview_options_menu)
@@ -345,17 +366,36 @@ class MainWindow(QMainWindow):
         self.preview_grid_button.setIcon(preview_toolbar_icon('grid'))
         self.preview_grid_button.setIconSize(QSize(20, 20))
         self.preview_grid_button.setCheckable(True)
+        # Two real buttons instead of Qt's platform-drawn MenuButtonPopup:
+        # the native split arrow was truncated under the shared toolbar skin.
+        self.preview_grid_menu_button = QToolButton()
+        self.preview_grid_menu_button.setObjectName('previewGridMenuButton')
+        self.preview_grid_menu_button.setFixedSize(24, 32)
+        self.preview_grid_menu_button.setIcon(preview_toolbar_icon('chevron-down'))
+        self.preview_grid_menu_button.setIconSize(QSize(14, 14))
+        self.preview_grid_menu_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.preview_grid_menu_button.setMenu(self.preview_grid_menu)
+        # The surrounding previewToolbarGroup supplies normal hover/pressed styling.
+        # Remove padding only from this narrow arrow button to avoid clipping.
+        self.preview_grid_menu_button.setStyleSheet(
+            'QToolButton#previewGridMenuButton { padding: 0px; }'
+            'QToolButton#previewGridMenuButton::menu-indicator { '
+            'image: none; width: 0px; height: 0px; }')
+        self.preview_grid_menu_button.setToolTip('Grid and Axes settings')
+        self.preview_grid_menu_button.setAccessibleName('Grid and Axes settings')
         self.preview_grid_button.setChecked(self._grid_settings['mode'] != 'off')
         self.preview_grid_button.setStyleSheet(
             'QToolButton#previewGridButton:checked { background: #2c4555; '
             'border: 1px solid #4a8194; border-radius: 5px; }')
         self.preview_grid_button.setToolTip(
-            'Toggle grid. Configure grid type and axis marker in Preview Options.')
+            'Toggle preview grid; use the arrow for grid and axis settings.')
         self.preview_grid_button.setAccessibleName('Toggle preview grid')
         self.preview_grid_button.toggled.connect(self._toggle_preview_grid)
         self.preview_plate_group = make_preview_group(
             self.plate_button, preview_toolbar_separator(), self.plate_visibility_button,
-            preview_toolbar_separator(), self.preview_grid_button, name='build_plate')
+            preview_toolbar_separator(), self.preview_grid_button,
+            self.preview_grid_menu_button, name='build_plate')
 
         self.expand_preview_toggle = QToolButton()
         self.expand_preview_toggle.setObjectName('toggleExpandedPreview')
@@ -398,7 +438,8 @@ class MainWindow(QMainWindow):
         model_area.setMinimumHeight(195)
         self.preview_surface = ModelViewport()
         self.preview_surface.set_grid_preferences(
-            self._grid_settings['mode'], self._grid_settings['axes'])
+            self._grid_settings['mode'], self._grid_settings['axes'],
+            self._grid_settings['measurements'])
         self._refresh_preview_grid_actions()
         self.preview_surface.model_file_dropped.connect(self._open_model)
         self.preview_chrome = PreviewChrome(self.preview_surface)
@@ -423,6 +464,9 @@ class MainWindow(QMainWindow):
         self.forecast_countdown = ForecastCountdownOverlay(self.preview_surface)
         self.forecast_countdown.cancel_requested.connect(self._cancel_scheduled_forecast)
         self.forecast_countdown.run_now_requested.connect(self._run_scheduled_forecast_now)
+        # Legends are children of the OpenGL viewport, created after the XYZ
+        # indicator; register them for collision-free marker placement.
+        self.preview_surface._axis_indicator.refresh_obstacles()
         self.preview_splitter.addWidget(model_area)
 
         palette_area = QFrame()
@@ -1316,11 +1360,25 @@ class MainWindow(QMainWindow):
         self.strategy_hint = _label("", "helpText", wrap=True)
         col.addWidget(self.strategy_hint)
         col.addWidget(_label("Maximum palette size", "smallTitle"))
-        self.palette_limit = self._choice((("Auto", "auto"),) +
-                                          tuple((f"{i} colors", str(i)) for i in range(2, 33)))
+        # Compact common presets, with precise 2–32 values through Custom.
+        # The existing planner/3MF cap is deliberately unchanged here.
+        self.palette_limit = self._choice((("Auto", "auto"),
+            ("8 colors", "8"), ("16 colors", "16"),
+            ("24 colors", "24"), ("32 colors", "32")))
         self.palette_limit.setObjectName("paletteLimit")
-        col.addWidget(self.palette_limit)
-        col.addWidget(_label("Upper limit for physical + mixed filaments (32 maximum).",
+        palette_limit_row = QHBoxLayout()
+        palette_limit_row.setSpacing(6)
+        palette_limit_row.addWidget(self.palette_limit, 1)
+        self.palette_limit_custom = QPushButton("Custom…")
+        self.palette_limit_custom.setObjectName("paletteLimitCustom")
+        self.palette_limit_custom.setToolTip("Enter an exact palette budget from 2 to 32.")
+        self.palette_limit_custom.clicked.connect(self._choose_custom_palette_limit)
+        palette_limit_row.addWidget(self.palette_limit_custom)
+        col.addLayout(palette_limit_row)
+        col.addWidget(_label("Current FullSpectrum planner limit: 32 total colors. "
+                               "Bambu Studio 2.9.1 exempts mixed-color recipes "
+                               "from its 32 project-filament limit; larger budgets "
+                               "require separately validated engine/export support.",
                                "helpText", wrap=True))
         shortcut = QPushButton('Manage Filament Colors…')
         shortcut.setObjectName('manageFilamentsButton')
@@ -1454,6 +1512,36 @@ class MainWindow(QMainWindow):
         self.advanced_panel.setVisible(checked)
         self.advanced_toggle.setText("Advanced Settings ▾" if checked else "Advanced Settings ▸")
 
+    def _set_palette_limit_choice(self, value):
+        """Show a saved 2–32 custom value without a 31-row dropdown."""
+        value = str(value)
+        standard = {'auto', '8', '16', '24', '32'}
+        if value != 'auto' and (not value.isdecimal() or not 2 <= int(value) <= 32):
+            value = 'auto'
+        previous = getattr(self, '_palette_custom_value', None)
+        if previous and previous not in standard:
+            index = self.palette_limit.findData(previous)
+            if index >= 0:
+                self.palette_limit.removeItem(index)
+        self._palette_custom_value = None
+        if self.palette_limit.findData(value) < 0:
+            self.palette_limit.addItem(f'(Custom) {value} colors', value)
+            self._palette_custom_value = value
+        self._set_combo_value(self.palette_limit, value)
+
+    def _choose_custom_palette_limit(self, _checked=False):
+        current = self.palette_limit.currentData()
+        starting = int(current) if str(current).isdecimal() else 32
+        value, accepted = QInputDialog.getInt(
+            self, 'Custom Palette Size', 'Maximum output colors:',
+            starting, 2, 32, 1)
+        if not accepted:
+            return
+        # Suppress intermediate signal emissions when swapping a custom item.
+        with QSignalBlocker(self.palette_limit):
+            self._set_palette_limit_choice(str(value))
+        self._update_plan_value('max_output_colors', str(value))
+
     def _restore_plan_widgets(self):
         self._loading_plan_ui = True
         mapping = (
@@ -1469,6 +1557,8 @@ class MainWindow(QMainWindow):
         )
         for widget, field in mapping:
             self._set_combo_value(widget, self.plan_preferences.get(field))
+        # Saved custom palette budgets must survive UI restore/revert.
+        self._set_palette_limit_choice(self.plan_preferences.get("max_output_colors"))
         for widget, field in (
             (self.smart_quality, "smart_quality"),
             (self.auto_forecast, "auto_preview"),
@@ -2027,6 +2117,13 @@ class MainWindow(QMainWindow):
         action.setShortcut(QKeySequence.StandardKey.Open)
         action.triggered.connect(self._open_model)
         menu.addAction(action)
+        folder = QAction("Set Default Model Folder…", self)
+        folder.triggered.connect(self._choose_default_model_folder)
+        menu.addAction(folder)
+        reset_folder = QAction("Use Last Opened Model Folder", self)
+        reset_folder.triggered.connect(self._reset_default_model_folder)
+        menu.addAction(reset_folder)
+        menu.addSeparator()
         reference = QAction("Open &Reference…", self)
         reference.setShortcut(QKeySequence("Ctrl+Shift+R"))
         reference.triggered.connect(self._open_reference)
@@ -2061,23 +2158,42 @@ class MainWindow(QMainWindow):
         view.addAction(fullscreen)
         self.addAction(fullscreen)  # Active even while the menu bar is hidden.
 
+    def _fit_perspective_grid(self):
+        if not self.preview_surface.fit_perspective_grid():
+            self.statusBar().showMessage('Show the perspective grid and open a model to fit it.')
+        else:
+            self.statusBar().showMessage('Camera fitted to complete perspective grid.')
+
     def _refresh_preview_grid_actions(self):
+        if hasattr(self, 'preview_fit_grid_action'):
+            mode = self._grid_settings['mode']
+            has_scene = hasattr(self, 'preview_surface') and self.preview_surface.mesh is not None
+            plate_on = (hasattr(self, 'preview_surface') and
+                        self.preview_surface._plate_renderer.mesh is not None)
+            self.preview_fit_grid_action.setEnabled(
+                has_scene and (mode == 'perspective' or
+                               (mode == 'automatic' and not plate_on)))
         for mode, action in self.preview_grid_actions.items():
             with QSignalBlocker(action):
                 action.setChecked(mode == self._grid_settings['mode'])
         with QSignalBlocker(self.preview_axes_action):
             self.preview_axes_action.setChecked(self._grid_settings['axes'])
+        with QSignalBlocker(self.preview_measurements_action):
+            self.preview_measurements_action.setChecked(self._grid_settings['measurements'])
+        self.preview_measurements_action.setEnabled(
+            self._grid_settings['mode'] in ('automatic', 'perspective'))
         if hasattr(self, 'preview_grid_button'):
             with QSignalBlocker(self.preview_grid_button):
                 self.preview_grid_button.setChecked(self._grid_settings['mode'] != 'off')
             self.preview_grid_button.setToolTip(
                 'Grid: ' + self._grid_settings['mode'].title() +
-                ' · Click to toggle; options in Preview Options > Grid and Axes')
+                ' · Click to toggle; arrow opens Grid and Axes settings')
 
     def _commit_preview_grid_settings(self):
         self._refresh_preview_grid_actions()
         self.preview_surface.set_grid_preferences(
-            self._grid_settings['mode'], self._grid_settings['axes'])
+            self._grid_settings['mode'], self._grid_settings['axes'],
+            self._grid_settings['measurements'])
         try:
             write_grid_settings(self._grid_settings_path, self._grid_settings)
         except OSError as exc:
@@ -2093,6 +2209,11 @@ class MainWindow(QMainWindow):
 
     def _set_preview_axes_visible(self, enabled):
         self._grid_settings['axes'] = bool(enabled)
+        self._commit_preview_grid_settings()
+
+    def _set_preview_measurements_visible(self, enabled):
+        # Only the perspective grid has configurable measurement overlays.
+        self._grid_settings['measurements'] = bool(enabled)
         self._commit_preview_grid_settings()
 
     def _save_plate_workspace(self):
@@ -2172,6 +2293,9 @@ class MainWindow(QMainWindow):
 
     def _refresh_plate_catalog(self):
         """Discover installed slicer plate profiles without blocking the viewport."""
+        # Startup singleShot can arrive after offscreen tests close the window.
+        if not self._qt_widgets_alive(self.plate_button):
+            return
         if self._plate_catalog_task is not None:
             self._plate_rescan_pending = True
             return
@@ -2185,6 +2309,8 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _plate_catalog_ready(self, catalog, error):
+        if not self._qt_widgets_alive(self.plate_button):
+            return
         if error is not None:
             self._plate_catalog = None
             self._plate_pending_picker = False
@@ -2218,6 +2344,10 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._choose_plate)
 
     def _release_plate_catalog(self, worker):
+        if getattr(self, '_qt_disposing', False):
+            return  # parent QObject owns worker teardown
+        if not self._qt_widgets_alive(self.plate_button):
+            return
         if self._plate_catalog_task is worker:
             self._plate_catalog_task = None
         worker.deleteLater()
@@ -2381,15 +2511,44 @@ class MainWindow(QMainWindow):
                 worker.wait()
         super().closeEvent(event)
 
+    def _persist_model_location(self):
+        try:
+            write_model_location(self._model_location_path, self._model_location)
+        except OSError as exc:
+            if self._qt_widgets_alive(self):
+                self.statusBar().showMessage('Unable to save model folder preference: ' + str(exc))
+
+    def _choose_default_model_folder(self, _checked=False):
+        starting = initial_model_directory(self._model_location)
+        directory = QFileDialog.getExistingDirectory(
+            self, 'Choose Default Model Folder', starting)
+        if directory:
+            try:
+                self._model_location = with_default_folder(self._model_location, directory)
+            except (OSError, ValueError):
+                return
+            self._persist_model_location()
+            self.statusBar().showMessage('Default model folder: ' + directory)
+
+    def _reset_default_model_folder(self, _checked=False):
+        self._model_location['default_directory'] = ''
+        self._persist_model_location()
+        self.statusBar().showMessage('Model picker will use the last opened folder.')
+
     def _open_model(self, path=None):
         if self._export_task is not None:
             QMessageBox.information(self, 'Export in progress', 'Wait for export to finish before changing models.')
             return
         # QAction/QPushButton passes a bool, while the viewport emits a file path.
         if not isinstance(path, (str, os.PathLike)):
-            path, _ = QFileDialog.getOpenFileName(self, "Open 3D Model", "", MODEL_FILE_FILTER)
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open 3D Model", initial_model_directory(self._model_location),
+                MODEL_FILE_FILTER)
         if not self.state.select_model(path):
             return
+        # Handles both Open Model and drag-and-drop, but not cancelled picks.
+        self._model_location = with_last_opened_model(self._model_location, path)
+        self._persist_model_location()
         name = display_filename(path)
         self.project_subtitle.setText(name)
         self._pending_review_filament_key = None

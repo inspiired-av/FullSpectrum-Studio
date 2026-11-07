@@ -47,8 +47,20 @@ def world_grid_vertices(bounds, floor_z, *, max_intervals=60):
     half = min(max_intervals // 2, math.ceil(half_extent / step))
     cx_index = round(center_x / step)
     cy_index = round(center_y / step)
-    ix0, ix1 = cx_index - half, cx_index + half
-    iy0, iy1 = cy_index - half, cy_index + half
+    # The perspective ruler's zero is a GRID-RELATIVE origin, not world (0,0).
+    # Its zero must coincide with the actual lower-X/lower-Y boundary corner,
+    # rather than the first major line several small squares INSIDE the grid.
+    # Enlarge each edge outward to a multiple of five minor divisions, so
+    # every boundary is also a major division. The grid remains centered near
+    # the model and each small cell retains its exact millimeter spacing.
+    # Up to four extra minor intervals per edge are bounded overhead.
+    major = 5
+    target_ix0, target_ix1 = cx_index - half, cx_index + half
+    target_iy0, target_iy1 = cy_index - half, cy_index + half
+    ix0 = (target_ix0 // major) * major
+    iy0 = (target_iy0 // major) * major
+    ix1 = -(-target_ix1 // major) * major
+    iy1 = -(-target_iy1 // major) * major
     a, b = ix0 * step, ix1 * step
     c, d = iy0 * step, iy1 * step
     vertices = array('f')
@@ -56,11 +68,16 @@ def world_grid_vertices(bounds, floor_z, *, max_intervals=60):
     def line(px, py, qx, qy, tint):
         vertices.extend((px, py, floor_z, *tint, qx, qy, floor_z, *tint))
 
+    # Every boundary is a major interval, so the shared ruler zero and
+    # highlighted X/Y edges meet at the ACTUAL minimum-X/minimum-Y corner.
+    # These are local ruler axes, not the model's absolute world origin.
+    ruler_x_index = ix0
+    ruler_y_index = iy0
+
     for xindex in range(ix0, ix1 + 1):
         x = xindex * step
-        # World origin gets a muted red X-coordinate axis (X runs along Y=0,
-        # so this is the GREEN Y-axis line at X=0).
-        if xindex == 0:
+        # Fixed X is the Y-directed green ruler axis.
+        if xindex == ruler_x_index:
             color = (0.26, 0.60, 0.35, 0.75)
         elif xindex % 5 == 0:
             color = (0.52, 0.60, 0.66, 0.35)
@@ -69,7 +86,8 @@ def world_grid_vertices(bounds, floor_z, *, max_intervals=60):
         line(x, c, x, d, color)
     for yindex in range(iy0, iy1 + 1):
         y = yindex * step
-        if yindex == 0:
+        # Fixed Y is the X-directed red ruler axis.
+        if yindex == ruler_y_index:
             color = (0.83, 0.32, 0.32, 0.75)
         elif yindex % 5 == 0:
             color = (0.52, 0.60, 0.66, 0.35)

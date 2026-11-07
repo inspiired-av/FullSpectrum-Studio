@@ -10,6 +10,11 @@ from desktop.qt_app.preview_shading import flatten_faces as _flatten_faces
 from desktop.qt_app.preview_stage6a import classify_model_drop
 from desktop.qt_app.plate_gl import PlateGpuRenderer
 from desktop.qt_app.preview_grid_gl import WorldGridRenderer
+from desktop.qt_app.preview_grid_camera import (
+    world_grid_footprint, expand_clip_for_grid, scene_grid_bounds, fit_grid_zoom,
+)
+from desktop.qt_app.preview_grid_ruler_gl import WorldGridRulerRenderer
+from desktop.qt_app.preview_grid_measurement_overlay import PerspectiveGridMeasurementOverlay
 from desktop.qt_app.preview_axis_indicator import ViewAxisIndicator
 from desktop.qt_app.preview_grid_policy import choose_grid_layers
 from desktop.qt_app.plate_mesh import combined_scene_bounds
@@ -164,8 +169,11 @@ class ModelViewport(QOpenGLWidget):
         self._influence_data=None;self._influence_texture=0;self._influence_dirty=False
         self._plate_renderer = PlateGpuRenderer()  # Own GL objects; never part of model buffers.
         self._world_grid = WorldGridRenderer()  # Independent resources; draw only when requested.
+        self._world_ruler = WorldGridRulerRenderer()  # Depth-tested, perspective-only numeric labels.
+        self._grid_ruler_failed = False
         self._grid_mode = 'automatic'
         self._grid_show_axes = True
+        self._grid_show_measurements = True
         self._grid_failed = False
         self._influence_display='physical';self._influence_selected=0
         self._last=None;self._drag_button=None
@@ -180,6 +188,7 @@ class ModelViewport(QOpenGLWidget):
         self._center=(0.,0.,0.);self._radius=1.
         self.setToolTip('Left drag: orbit · Right drag or Shift+drag: pan · Wheel: zoom · R: reset view')
         self._axis_indicator = ViewAxisIndicator(self)
+        self._grid_measurements = PerspectiveGridMeasurementOverlay(self)
 
     @property
     def mesh(self):return self._mesh
@@ -191,7 +200,10 @@ class ModelViewport(QOpenGLWidget):
         self._verts=len(self._data)//12 if self._data is not None else 0
         self._dirty=True
         self._axis_indicator.setVisible(mesh is not None and self._grid_show_axes)
+        self._axis_indicator.refresh_obstacles()
         self._axis_indicator.update()
+        if mesh is None:
+            self._grid_measurements.clear_scene()
         if preserve_camera:
             self.update()
         else:
@@ -204,17 +216,54 @@ class ModelViewport(QOpenGLWidget):
     def set_plate(self, plate_mesh, texture_path=None):
         """Swap visual plate assets without touching the model mesh, camera or exports."""
         self._plate_renderer.set_plate(plate_mesh, texture_path)
+        _plate, show_world = choose_grid_layers(
+            self._grid_mode, plate_visible=plate_mesh is not None,
+            plate_has_art=bool(texture_path))
+        if not show_world:
+            self._grid_measurements.clear_scene()
         self.update()
 
-    def set_grid_preferences(self, mode='automatic', show_axes=True):
+    def set_grid_preferences(self, mode='automatic', show_axes=True,
+                             show_measurements=True):
         """Display-only: grid and XYZ overlay never enter export/forecast data."""
         if mode not in ('automatic', 'plate', 'perspective', 'off'):
             raise ValueError('Unknown grid mode: ' + str(mode))
         self._grid_mode = mode
         self._grid_show_axes = bool(show_axes)
+        self._grid_show_measurements = bool(show_measurements)
+        self._grid_measurements.set_enabled(self._grid_show_measurements)
+        _plate, show_world = choose_grid_layers(
+            mode, plate_visible=self._plate_renderer.mesh is not None,
+            plate_has_art=bool(self._plate_renderer.texture_path))
+        if not show_world or not self._grid_show_measurements:
+            self._grid_measurements.clear_scene()
         self._axis_indicator.setVisible(self._mesh is not None and self._grid_show_axes)
+        self._axis_indicator.refresh_obstacles()
         self._axis_indicator.update()
         self.update()
+
+    def fit_perspective_grid(self):
+        """Explicitly frame the whole reference grid without changing the view angle.
+
+        Unlike Reset Camera, this deliberately prioritizes the full grid extent.
+        Zooming back in may crop the grid at screen edges, as expected.
+        """
+        plate = self._plate_renderer.mesh
+        _plate_grid, world_grid = choose_grid_layers(
+            self._grid_mode, plate_visible=plate is not None,
+            plate_has_art=bool(self._plate_renderer.texture_path))
+        if self._mesh is None or not world_grid:
+            return False
+        floor_z = self._mesh.bounds[2] - 0.75
+        if plate is not None:
+            floor_z = combined_scene_bounds(self._mesh.bounds, plate.bounds)[2] - 0.75
+        x0, y0, z0, x1, y1, z1 = scene_grid_bounds(self._mesh.bounds, floor_z)
+        self._center = ((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2)
+        self._radius = max(math.dist((x0,y0,z0), (x1,y1,z1)) / 2, 0.01)
+        self.zoom = fit_grid_zoom(self.width(), self.height())
+        self.pan_x = self.pan_y = 0.0
+        self.update()
+        return True
 
     def set_highlights(self, selected=None, protected=()):
         # Shader uniforms avoid rebuilding the entire mesh when colors change.
@@ -345,7 +394,9 @@ class ModelViewport(QOpenGLWidget):
         # synchronous makeCurrent() call that could flicker on HDR displays.
         if self._plate_renderer.mesh is None and self._plate_renderer.program:
             self._plate_renderer.release(gl)
-        if self._error or not self._mesh or not self._verts:return
+        if self._error or not self._mesh or not self._verts:
+            self._grid_measurements.clear_scene()
+            return
         try:
             if self._dirty:self._upload()
             radius=self._radius
@@ -367,6 +418,23 @@ class ModelViewport(QOpenGLWidget):
                     (eye.x(),eye.y(),eye.z()), self._mesh.bounds,
                     plate_mesh.bounds, (near,far),
                     (target.x(),target.y(),target.z()))
+            # The model/plate clip planes can truncate the *larger* world grid
+            # even when its lines are inside the visible viewport. Include the
+            # same four XY corners the grid renderer uses before projection.
+            # Screen-edge clipping on an intentionally zoomed-in view remains normal.
+            _grid_plate, _grid_world = choose_grid_layers(
+                self._grid_mode, plate_visible=plate_mesh is not None,
+                plate_has_art=bool(self._plate_renderer.texture_path))
+            if _grid_world and not self._grid_failed:
+                grid_floor = self._mesh.bounds[2] - 0.75
+                if plate_mesh is not None:
+                    grid_floor = combined_scene_bounds(
+                        self._mesh.bounds, plate_mesh.bounds)[2] - 0.75
+                grid_limits = world_grid_footprint(tuple(self._mesh.bounds))
+                near, far = expand_clip_for_grid(
+                    (eye.x(), eye.y(), eye.z()),
+                    (target.x(), target.y(), target.z()),
+                    (near, far), grid_limits, grid_floor)
             projection.perspective(45.,max(0.01,self.width()/max(1,self.height())), near,far)
             mvp=projection*view
             gl.glUseProgram(self._program)
@@ -431,10 +499,36 @@ class ModelViewport(QOpenGLWidget):
                         floor_z = combined_scene_bounds(
                             self._mesh.bounds, plate.bounds)[2] - 0.75
                     self._world_grid.draw(gl, mvp, self._mesh.bounds, floor_z)
+                    if self._grid_show_measurements:
+                        self._grid_measurements.set_scene(
+                            mvp, self._world_grid.grid_step,
+                            self._world_grid.xy_limits, floor_z)
+                        # Draw labels in the SAME depth-tested OpenGL scene as
+                        # the model and reference grid; never via QWidget text.
+                        # A broken glyph atlas must not disable the grid itself.
+                        if not self._grid_ruler_failed:
+                            try:
+                                pixel_ratio = self.devicePixelRatioF()
+                                self._world_ruler.draw(
+                                    gl, mvp, self._world_grid.grid_step,
+                                    self._world_grid.xy_limits, floor_z,
+                                    viewport_pixels=(
+                                        max(1, round(self.width() * pixel_ratio)),
+                                        max(1, round(self.height() * pixel_ratio))),
+                                    dpr=pixel_ratio)
+                            except Exception as ruler_exc:
+                                self._grid_ruler_failed = True
+                                self.grid_render_error.emit(
+                                    'Perspective ruler unavailable: ' + str(ruler_exc))
+                    else:
+                        self._grid_measurements.clear_scene()
                 except Exception as grid_exc:
+                    self._grid_measurements.clear_scene()
                     # A grid shader failure must not disable the model renderer.
                     self._grid_failed = True
                     self.grid_render_error.emit(str(grid_exc))
+            else:
+                self._grid_measurements.clear_scene()
         except Exception as exc:
             self._error='Unable to render model: '+str(exc)
             self.render_error.emit(self._error)
@@ -535,6 +629,7 @@ class ModelViewport(QOpenGLWidget):
             try:
                 self._plate_renderer.release(self._gl)
                 self._world_grid.release(self._gl)
+                self._world_ruler.release(self._gl)
                 if self._influence_texture:
                     self._gl.glDeleteTextures([self._influence_texture]);self._influence_texture=0
                 if self._vbo:self._gl.glDeleteBuffers(1,[self._vbo]);self._vbo=0

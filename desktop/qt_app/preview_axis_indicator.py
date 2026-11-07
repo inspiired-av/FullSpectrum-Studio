@@ -7,13 +7,22 @@ from PySide6.QtCore import QEvent, Qt, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import QWidget
 
+from desktop.qt_app.preview_axis_layout import axis_marker_position
+
 
 class ViewAxisIndicator(QWidget):
     """Camera-relative axis triad; no OpenGL and no change to model coordinates."""
 
+    OBSTACLES = (
+        'colorLossLegend', 'anchorInfluenceLegend',
+        'forecastCountdownOverlay', 'previewEstimatedAccuracy',
+        'previewDropFeedback',
+    )
+
     def __init__(self, viewport):
         super().__init__(viewport)
         self.viewport = viewport
+        self._watched_obstacles = set()
         self.setObjectName('previewAxisIndicator')
         self.setFixedSize(104, 104)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -21,13 +30,57 @@ class ViewAxisIndicator(QWidget):
         viewport.installEventFilter(self)
         self._position()
         self.hide()
+        # The main window calls refresh_obstacles() after constructing its
+        # viewport legends and forecast popup; there are no delayed callbacks.
 
-    def _position(self):
-        self.move(9, max(0, self.viewport.height() - self.height() - 9))
+    def refresh_obstacles(self):
+        viewport = getattr(self, 'viewport', None)
+        if viewport is None:
+            return
+        for name in self.OBSTACLES:
+            item = viewport.findChild(QWidget, name)
+            if item is not None and item not in self._watched_obstacles:
+                item.installEventFilter(self)
+                self._watched_obstacles.add(item)
+        self._position()
+
+    def _position(self, changing=None):
+        viewport = getattr(self, 'viewport', None)
+        if viewport is None:
+            return
+        occupied = []
+        for widget in tuple(self._watched_obstacles):
+            try:
+                visible = (changing[1] if changing is not None and widget is changing[0]
+                           else widget.isVisible())
+                if visible:
+                    rect = widget.geometry()
+                    occupied.append((rect.x(), rect.y(), rect.width(), rect.height()))
+            except RuntimeError:
+                # A Qt C++ child may be deleted during window teardown.
+                self._watched_obstacles.discard(widget)
+        pos = axis_marker_position(viewport.width(), viewport.height(),
+                                   self.width(), self.height(), occupied)
+        if pos is None:
+            # A small viewport may have no unobstructed corner. Keep the
+            # marker disabled until space returns rather than cover controls.
+            self.hide()
+        else:
+            self.move(*pos)
+            if viewport.mesh is not None and getattr(viewport, '_grid_show_axes', True):
+                self.show()
 
     def eventFilter(self, watched, event):
         if watched is self.viewport and event.type() == QEvent.Type.Resize:
-            self._position()
+            self.refresh_obstacles()
+        elif watched in self._watched_obstacles and event.type() in (
+                QEvent.Type.Show, QEvent.Type.Hide,
+                QEvent.Type.Move, QEvent.Type.Resize):
+            # The Show/Hide event can arrive before isVisible() changes.
+            kind = event.type()
+            forced = ((watched, kind == QEvent.Type.Show)
+                      if kind in (QEvent.Type.Show, QEvent.Type.Hide) else None)
+            self._position(forced)
         return super().eventFilter(watched, event)
 
     def paintEvent(self, event):

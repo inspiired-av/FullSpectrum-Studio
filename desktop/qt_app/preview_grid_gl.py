@@ -8,6 +8,7 @@ from array import array
 import ctypes
 
 from desktop.qt_app.preview_grid_geometry import world_grid_vertices
+from desktop.qt_app.preview_grid_measurements import grid_xy_limits
 
 _VERTEX = '''#version 330 core
 layout(location=0) in vec3 position;
@@ -33,6 +34,8 @@ class WorldGridRenderer:
         self.program = self.vao = self.vbo = 0
         self._key = None
         self._count = 0
+        self.grid_step = None
+        self.xy_limits = None
 
     @staticmethod
     def _shader(gl, kind, source):
@@ -75,7 +78,11 @@ class WorldGridRenderer:
         # orbit reuses GPU geometry and updates only the projection matrix.
         key = (tuple(bounds), float(floor_z))
         if key != self._key:
-            data, _step = world_grid_vertices(bounds, floor_z)
+            data, step = world_grid_vertices(bounds, floor_z)
+            # Metadata comes from the identical vertices and spacing uploaded
+            # to the GPU, never from an independent approximation.
+            self.grid_step = float(step)
+            self.xy_limits = grid_xy_limits(data)
             self._count = len(data) // 7
             gl.glBindVertexArray(self.vao)
             gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo)
@@ -113,3 +120,5 @@ class WorldGridRenderer:
             gl.glDeleteProgram(self.program); self.program = 0
         self._key = None
         self._count = 0
+        self.grid_step = None
+        self.xy_limits = None
