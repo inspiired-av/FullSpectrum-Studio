@@ -40,6 +40,7 @@ class PreviewMesh:
     render_buffer: object = field(default=None, compare=False, repr=False)  # prepared off the UI thread
     corner_colors: tuple = ()  # exact (color1,color2,color3) per triangle, for GPU interpolation
     load_profile: object = field(default=None, compare=False, repr=False)  # preview-only telemetry
+    render_indexed: object = field(default=None, compare=False, repr=False)  # opt-in GPU candidate
 
     @property
     def sampled(self):

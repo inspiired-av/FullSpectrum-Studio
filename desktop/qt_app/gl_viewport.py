@@ -177,6 +177,12 @@ class ModelViewport(QOpenGLWidget):
                 'direct', 'split', 'raw-direct', 'raw-split'):
             self._preview_upload_mode='direct'
         self._preview_fallback_prepare_ms=None
+        # Mirrors the background worker predicate, including diagnostic overrides.
+        from desktop.qt_app.preview_indexed_mode import enabled as indexing_enabled
+        self._preview_index_enabled=indexing_enabled()
+        self._preview_index_fallback=None
+        self._indexed_active=False
+        self._ebo=0
         self._gl=None;self._program=0;self._vao=0;self._vbo=0;self._error=''
         self._influence_data=None;self._influence_texture=0;self._influence_dirty=False
         self._plate_renderer = PlateGpuRenderer()  # Own GL objects; never part of model buffers.
@@ -219,6 +225,7 @@ class ModelViewport(QOpenGLWidget):
         self._preview_upload_bytes=0
         self._preview_upload_detail=None
         self._preview_fallback_prepare_ms=None
+        self._preview_index_fallback=None
         # Prefer geometry prepared by ModelLoadWorker so the UI remains responsive.
         prepare_start = perf_counter()
         self._data=(getattr(mesh, 'render_buffer', None) or _flatten_faces(mesh)) if mesh else None
@@ -392,11 +399,85 @@ class ModelViewport(QOpenGLWidget):
             self._error=f'OpenGL 3.3 renderer unavailable: {exc}'
             self.render_error.emit(self._error)
 
+    def _upload_indexed_candidate(self, gl, candidate):
+        """Upload bit-identical unique vertices + u32 indices with Direct GL calls.
+
+        GL_ELEMENT_ARRAY_BUFFER is VAO state. The VBO and EBO are persistent
+        GL handles; buffer storage is replaced when a new preview is uploaded.
+        """
+        vertex_bytes = int(candidate.vertices.nbytes)
+        index_bytes = int(candidate.indices.nbytes)
+        require_upload_budget(vertex_bytes + index_bytes)
+        if (candidate.vertices.dtype.itemsize != 48 or
+                candidate.indices.dtype.itemsize != 4 or
+                not candidate.vertices.flags.c_contiguous or
+                not candidate.indices.flags.c_contiguous):
+            raise ValueError('Invalid indexed preview buffer layout')
+        if not self._ebo:
+            self._ebo = gl.glGenBuffers(1)
+        vpointer_start = perf_counter()
+        vertex_ptr = (ctypes.c_ubyte * vertex_bytes).from_buffer(candidate.vertices)
+        index_ptr = (ctypes.c_uint32 * candidate.indices.size).from_buffer(candidate.indices)
+        pointer_ms = (perf_counter() - vpointer_start) * 1000.0
+        gl.glBindVertexArray(self._vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._vbo)
+        upload_start = perf_counter()
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, vertex_bytes, vertex_ptr, gl.GL_STATIC_DRAW)
+        vbo_ms = (perf_counter() - upload_start) * 1000.0
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self._ebo)
+        ebo_start = perf_counter()
+        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, index_bytes, index_ptr, gl.GL_STATIC_DRAW)
+        ebo_ms = (perf_counter() - ebo_start) * 1000.0
+        self._preview_upload_ms = (perf_counter() - upload_start) * 1000.0
+        self._preview_upload_bytes = vertex_bytes + index_bytes
+        self._preview_upload_detail = {
+            'mode': 'indexed-direct',
+            'pointer_ms': pointer_ms,
+            'direct_ms': self._preview_upload_ms,
+            'vertex_vbo_bytes': vertex_bytes,
+            'index_ebo_bytes': index_bytes,
+            'unique_vertices': candidate.unique_vertex_count,
+            'index_build_ms': candidate.elapsed_ms,
+            'vertex_upload_ms': vbo_ms,
+            'index_upload_ms': ebo_ms,
+        }
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 48, ctypes.c_void_p(0))
+        gl.glEnableVertexAttribArray(1)
+        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, 48, ctypes.c_void_p(12))
+        gl.glEnableVertexAttribArray(2)
+        gl.glVertexAttribPointer(2, 3, gl.GL_FLOAT, gl.GL_FALSE, 48, ctypes.c_void_p(24))
+        gl.glEnableVertexAttribArray(3)
+        gl.glVertexAttribPointer(3, 3, gl.GL_FLOAT, gl.GL_FALSE, 48, ctypes.c_void_p(36))
+        gl.glBindVertexArray(0)
+        self._indexed_active = True
+        self._dirty = False
+
     def _upload(self):
         if not self._gl or not self._vao or not self._vbo:return
         gl=self._gl
+        candidate = (getattr(self._mesh, 'render_indexed', None)
+                     if getattr(self, '_preview_index_enabled', False)
+                     and getattr(self, '_preview_upload_mode', 'direct') == 'direct'
+                     else None)
+        if candidate is not None and candidate.worth_uploading():
+            try:
+                self._upload_indexed_candidate(gl, candidate)
+                return
+            except Exception as exc:
+                # Experimental indexing must never prevent the Direct baseline.
+                self._preview_index_fallback = str(exc)
+                self._indexed_active = False
+                gl.glBindVertexArray(self._vao)
+                gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, 0)
         gl.glBindVertexArray(self._vao)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER,self._vbo)
+        if getattr(self, '_indexed_active', False) and self._ebo:
+            # A later unindexed model must not retain the old EBO allocation.
+            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self._ebo)
+            gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, 0, None, gl.GL_STATIC_DRAW)
+            gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, 0)
+            self._indexed_active = False
         # Borrow the writable float32 array directly. The old tobytes()
         # path duplicated the entire expanded mesh in Python heap memory.
         count=len(self._data) if self._data is not None else 0
@@ -456,6 +537,10 @@ class ModelViewport(QOpenGLWidget):
         self._preview_upload_detail={
             'mode':mode, 'pointer_ms':pointer_ms, 'direct_ms':direct_ms,
             'allocation_ms':allocation_ms, 'transfer_ms':transfer_ms}
+        self._preview_upload_detail['indexed_preferred'] = bool(
+            getattr(self, '_preview_index_enabled', False) and mode == 'direct')
+        if getattr(self, '_preview_index_fallback', None):
+            self._preview_upload_detail['indexed_fallback']=self._preview_index_fallback
         gl.glEnableVertexAttribArray(0)
         gl.glVertexAttribPointer(0,3,gl.GL_FLOAT,gl.GL_FALSE,48,ctypes.c_void_p(0))
         gl.glEnableVertexAttribArray(1)
@@ -560,7 +645,10 @@ class ModelViewport(QOpenGLWidget):
                 gl.glUniform3f(gl.glGetUniformLocation(self._program,f'protectedSourceColors[{i}]'),*to_rgb(color))
             gl.glBindVertexArray(self._vao)
             if self.wireframe:gl.glPolygonMode(gl.GL_FRONT_AND_BACK,gl.GL_LINE)
-            gl.glDrawArrays(gl.GL_TRIANGLES,0,self._verts)
+            if getattr(self, "_indexed_active", False):
+                gl.glDrawElements(gl.GL_TRIANGLES,self._verts,gl.GL_UNSIGNED_INT,None)
+            else:
+                gl.glDrawArrays(gl.GL_TRIANGLES,0,self._verts)
             if self.wireframe:gl.glPolygonMode(gl.GL_FRONT_AND_BACK,gl.GL_FILL)
             gl.glBindVertexArray(0);gl.glUseProgram(0)
             plate = self._plate_renderer.mesh
@@ -716,6 +804,7 @@ class ModelViewport(QOpenGLWidget):
                 self._world_ruler.release(self._gl)
                 if self._influence_texture:
                     self._gl.glDeleteTextures([self._influence_texture]);self._influence_texture=0
+                if self._ebo:self._gl.glDeleteBuffers(1,[self._ebo]);self._ebo=0
                 if self._vbo:self._gl.glDeleteBuffers(1,[self._vbo]);self._vbo=0
                 if self._vao:self._gl.glDeleteVertexArrays(1,[self._vao]);self._vao=0
                 if self._program:self._gl.glDeleteProgram(self._program);self._program=0

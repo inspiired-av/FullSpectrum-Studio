@@ -32,6 +32,11 @@ class PreviewLoadProfile:
     resources: PreviewResourceEstimate
     parse_ms: float
     prepare_ms: float
+    quality_ms: float = 0.0
+    quality_mode: str = "auto"
+    quality_effective: str = "full"
+    quality_source_triangles: int = 0
+    quality_reason: str = ""
 
 
 def preview_resource_estimate(mesh) -> PreviewResourceEstimate:
@@ -118,6 +123,11 @@ def preview_performance_snapshot(mesh, *, upload_submit_ms=None,
         'gpu_buffer_bytes': int(upload_bytes),
         'parse_ms': profile.parse_ms if profile else None,
         'prepare_ms': profile.prepare_ms if profile else fallback_prepare_ms,
+        'quality_ms': profile.quality_ms if profile else None,
+        'quality_mode': profile.quality_mode if profile else 'auto',
+        'quality_effective': profile.quality_effective if profile else 'full',
+        'quality_source_triangles': profile.quality_source_triangles if profile else estimate.triangles,
+        'quality_reason': profile.quality_reason if profile else '',
         'upload_submit_ms': upload_submit_ms,
         'upload_detail': dict(upload_detail) if upload_detail else None,
     }
@@ -128,7 +138,17 @@ def format_preview_performance(snapshot) -> str:
         return 'Open a model to view preview performance information.'
     detail = snapshot.get('upload_detail') or {}
     mode = detail.get('mode', 'direct')
-    if mode in ('split', 'raw-split'):
+    if mode == 'indexed-direct':
+        label = 'Indexed Direct (default)'
+        upload_lines = (
+            f"GPU upload mode: {label}\n"
+            f"Unique GPU vertices: {detail.get('unique_vertices', 0):,}\n"
+            f"Indexing construction: {_format_ms(detail.get('index_build_ms'))}\n"
+            f"Indexed VBO: {_format_mib(detail.get('vertex_vbo_bytes', 0))}\n"
+            f"Index EBO: {_format_mib(detail.get('index_ebo_bytes', 0))}\n"
+            f"VBO upload submission: {_format_ms(detail.get('vertex_upload_ms'))}\n"
+            f"EBO upload submission: {_format_ms(detail.get('index_upload_ms'))}\n")
+    elif mode in ('split', 'raw-split'):
         label = ('Raw split diagnostic (opt-in)' if mode == 'raw-split'
                  else 'Split diagnostic (opt-in)')
         upload_lines = (
@@ -138,18 +158,24 @@ def format_preview_performance(snapshot) -> str:
             f"GPU transfer submission: {_format_ms(detail.get('transfer_ms'))}\n")
     else:
         label = ('Raw direct diagnostic (opt-in)' if mode == 'raw-direct'
-                 else 'Direct (default)')
+                 else 'Direct (fallback)' if detail.get('indexed_preferred')
+                 else 'Direct (indexing disabled)')
         upload_lines = (
             f"GPU upload mode: {label}\n"
             f"Pointer preparation: {_format_ms(detail.get('pointer_ms'))}\n"
             f"Combined GPU allocation/transfer submission: "
             f"{_format_ms(detail.get('direct_ms'))}\n")
+    if detail.get('indexed_fallback'):
+        upload_lines += f"Indexed upload fell back to Direct: {detail['indexed_fallback']}\n"
     return (
         f"Source triangles: {snapshot['source_triangles']:,}\n"
         f"Drawn triangles: {snapshot['triangles']:,}\n"
         f"Vertices: {snapshot['vertices']:,}\n\n"
         f"Model parsing: {_format_ms(snapshot['parse_ms'])}\n"
         f"CPU geometry preparation: {_format_ms(snapshot['prepare_ms'])}\n"
+        f"Preview quality: {snapshot.get('quality_mode', 'auto').title()} → {snapshot.get('quality_effective', 'full').title()}\n"
+        f"LOD preparation: {_format_ms(snapshot.get('quality_ms'))}\n"
+        f"LOD details: {snapshot.get('quality_reason', '')}\n"
         f"GPU upload submission: {_format_ms(snapshot['upload_submit_ms'])}\n"
         f"{upload_lines}\n"
         f"Estimated decoded mesh: {_format_mib(snapshot['cpu_mesh_bytes'])}\n"

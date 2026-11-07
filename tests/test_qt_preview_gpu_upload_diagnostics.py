@@ -195,9 +195,13 @@ class GpuDiagnosticsPresentationTests(unittest.TestCase):
         result=preview_performance_snapshot(mesh,upload_submit_ms=2,
                                             upload_detail={'mode':'direct','direct_ms':2})
         message=format_preview_performance(result)
-        self.assertIn('Direct (default)',message)
+        self.assertIn('Direct (indexing disabled)',message)
         self.assertIn('Combined GPU allocation/transfer submission',message)
         self.assertIn('not GPU completion',message)
+        fallback=preview_performance_snapshot(mesh,upload_submit_ms=2,
+                 upload_detail={'mode':'direct','direct_ms':2,
+                                'indexed_preferred':True})
+        self.assertIn('Direct (fallback)',format_preview_performance(fallback))
 
 
 if __name__=='__main__':

@@ -160,13 +160,20 @@ class RawUploadProbeTests(unittest.TestCase):
         mesh=SimpleNamespace(vertices=[(0,0,0)]*3,triangles=[(0,1,2)],
                              source_triangles=1,face_colors=(),corner_colors=(),
                              load_profile=None)
-        for mode,label in [('direct','Direct (default)'),('split','Split diagnostic (opt-in)'),
+        for mode,label in [('direct','Direct (indexing disabled)'),('split','Split diagnostic (opt-in)'),
                            ('raw-direct','Raw direct diagnostic (opt-in)'),
                            ('raw-split','Raw split diagnostic (opt-in)')]:
             snap=preview_performance_snapshot(mesh,upload_submit_ms=3.2,
                   upload_detail={'mode':mode,'direct_ms':1.0,'allocation_ms':1.0,
                                  'transfer_ms':2.0,'pointer_ms':0.0})
             self.assertIn(label,format_preview_performance(snap))
+        for mode, preferred, expected in [
+                ('direct', True, 'Direct (fallback)'),
+                ('indexed-direct', False, 'Indexed Direct (default)')]:
+            snap=preview_performance_snapshot(mesh,upload_submit_ms=3.2,
+                  upload_detail={'mode':mode,'indexed_preferred':preferred,
+                                 'direct_ms':1.0,'pointer_ms':0.0})
+            self.assertIn(expected,format_preview_performance(snap))
 
 
 if __name__=='__main__':

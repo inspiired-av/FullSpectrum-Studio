@@ -101,6 +101,9 @@ def _disabled(widget, reason):
     return widget
 
 
+from desktop.qt_app.preview_quality import (
+    QUALITY_MODES, SETTINGS_FILENAME, read_quality, write_quality)
+
 class MainWindow(QMainWindow):
     """Mac-inspired workspace shell with functioning file selection and navigation."""
 
@@ -179,6 +182,13 @@ class MainWindow(QMainWindow):
         self._grid_settings = read_grid_settings(self._grid_settings_path)
         self._model_location_path = model_location_path(self._plate_settings_path)
         self._model_location = read_model_location(self._model_location_path)
+        self._preview_quality_path = self._plate_settings_path.with_name(SETTINGS_FILENAME)
+        self._preview_quality = read_quality(self._preview_quality_path)
+        self._preview_quality_generation = 0
+        self._preview_quality_source_mesh = None
+        self._preview_quality_cache = {}  # at most two finished display buffers
+        self._preview_quality_task = None
+        self._preview_quality_pending = False
         self._plate_default = self._plate_workspace.get('default')
         self._plate_default_pending = self._plate_default is not None
         self._plate_visible = self._plate_workspace.get('visible', True)
@@ -450,6 +460,30 @@ class MainWindow(QMainWindow):
         self.preview_surface.grid_render_error.connect(self._grid_render_failed)
         self.preview_surface.background_clicked.connect(self._clear_palette_selection)
         model_layout.addWidget(self.preview_surface, stretch=1)
+        # A visible indeterminate progress bar: no inaccurate percentage.
+        # Keeping it in the viewport layout avoids overlay/XYZ collisions.
+        from PySide6.QtWidgets import QProgressBar
+        self.preview_quality_activity = QFrame(model_area)
+        self.preview_quality_activity.setObjectName('previewQualityActivity')
+        self.preview_quality_activity.setStyleSheet(
+            'QFrame#previewQualityActivity { background: #17303c; '
+            'border: 1px solid #35637a; border-radius: 5px; }'
+            'QLabel { color: #c4e7ef; border: none; font-size: 11px; }'
+            'QProgressBar { border: none; background: #264452; '
+            'border-radius: 3px; }'
+            'QProgressBar::chunk { background: #56b6c9; }')
+        activity_row = QHBoxLayout(self.preview_quality_activity)
+        activity_row.setContentsMargins(10, 5, 10, 5)
+        activity_row.setSpacing(10)
+        self.preview_quality_activity_label = QLabel('Preparing preview…')
+        activity_row.addWidget(self.preview_quality_activity_label, 1)
+        self.preview_quality_activity_bar = QProgressBar()
+        self.preview_quality_activity_bar.setRange(0, 0)
+        self.preview_quality_activity_bar.setTextVisible(False)
+        self.preview_quality_activity_bar.setFixedSize(105, 7)
+        activity_row.addWidget(self.preview_quality_activity_bar)
+        model_layout.addWidget(self.preview_quality_activity)
+        self.preview_quality_activity.hide()
         self.preview_status = _label("Open a 3MF, OBJ or GLB model to view its geometry.", "helpText", wrap=True)
         model_layout.addWidget(self.preview_status)
         # A compact in-viewport key is easier to read than an inline footnote.
@@ -2162,12 +2196,111 @@ class MainWindow(QMainWindow):
         metrics.setObjectName('previewPerformanceAction')
         metrics.triggered.connect(self._show_preview_performance)
         view.addAction(metrics)
+        self.preview_quality_menu = view.addMenu("Preview Quality")
+        self.preview_quality_actions = {}
+        for mode, label in (("auto", "Automatic (recommended)"),
+                            ("full", "Full Detail"),
+                            ("balanced", "Balanced"),
+                            ("performance", "Performance")):
+            action = self.preview_quality_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked=False, chosen=mode: self._set_preview_quality(chosen))
+            self.preview_quality_actions[mode] = action
+        self.preview_quality_menu.aboutToShow.connect(self._refresh_preview_quality_actions)
 
     def _show_preview_performance(self):
         """On-demand display diagnostics; never changes forecast or export."""
         snapshot=self.preview_surface.preview_performance_snapshot()
         QMessageBox.information(self, "Preview Performance",
                                 format_preview_performance(snapshot))
+
+    def _refresh_preview_quality_actions(self):
+        for mode, action in self.preview_quality_actions.items():
+            action.setChecked(mode == self._preview_quality)
+
+    def _set_preview_quality_busy(self, message=''):
+        self.preview_quality_activity_label.setText(message)
+        self.preview_quality_activity.setVisible(bool(message))
+
+    def _set_preview_quality(self, mode):
+        if mode not in QUALITY_MODES or mode == self._preview_quality:
+            return
+        self._preview_quality = mode
+        write_quality(self._preview_quality_path, mode)
+        self._refresh_preview_quality_actions()
+        self._reload_preview_quality()
+
+    def _reload_preview_quality(self):
+        if self._original_mesh is None or not self.state.model_path:
+            return  # Next normal load uses this preference.
+        self._preview_quality_generation += 1
+        self._preview_quality_pending = True
+        label = {'auto': 'Automatic', 'full': 'Full Detail',
+                 'balanced': 'Balanced', 'performance': 'Performance'}[
+                     self._preview_quality]
+        self._set_preview_quality_busy(f'Preparing {label} preview…')
+        # Rapid mode selections must not spawn simultaneous expensive workers.
+        if self._preview_quality_task is not None:
+            self._preview_quality_task.requestInterruption()
+        self._start_preview_quality_if_idle()
+
+    def _start_preview_quality_if_idle(self):
+        if self._preview_quality_task is not None or not self._preview_quality_pending:
+            return
+        self._preview_quality_pending = False
+        generation = self._preview_quality_generation
+        serial = self._preview_serial
+        path = self.state.model_path
+        mode = self._preview_quality
+        cached = self._preview_quality_cache.get(mode)
+        if cached is not None:
+            self._preview_quality_loaded(serial, generation, path, cached, None)
+            self._set_preview_quality_busy('')
+            return
+        task = ModelLoadWorker(
+            path, self, quality=mode, source_mesh=self._preview_quality_source_mesh)
+        task._preview_source_serial = serial
+        self._preview_quality_task = task
+        self._preview_threads.append(task)
+        task.completed.connect(
+            lambda mesh, error, filename, g=generation, s=serial, m=mode:
+                self._preview_quality_loaded(s, g, filename, mesh, error, m))
+        task.finished.connect(lambda t=task: self._preview_quality_finished(t))
+        self.statusBar().showMessage('Preparing display-only preview quality…')
+        task.start()
+
+    def _preview_quality_finished(self, task):
+        if self._preview_quality_task is task:
+            self._preview_quality_task = None
+        self._release_preview_task(task)
+        if self._preview_quality_pending and self._original_mesh is not None:
+            QTimer.singleShot(0, self._start_preview_quality_if_idle)
+        elif task._preview_source_serial == self._preview_serial:
+            self._set_preview_quality_busy('')
+
+    def _preview_quality_loaded(self, serial, generation, path, mesh, error, mode=None):
+        if (serial != self._preview_serial or
+                generation != self._preview_quality_generation or
+                path != self.state.model_path):
+            return  # Never install an obsolete display mesh.
+        if error:
+            self.statusBar().showMessage('Preview quality update failed: ' + error)
+            return  # Previous working viewport remains intact.
+        mode = mode or self._preview_quality
+        self._preview_quality_cache[mode] = mesh
+        while len(self._preview_quality_cache) > 2:
+            self._preview_quality_cache.pop(next(iter(self._preview_quality_cache)))
+        self._original_mesh = mesh
+        if self.preview_mode.currentText() in ('Original', 'Wireframe'):
+            self.preview_surface.set_mesh(mesh, preserve_camera=True)
+            self._update_preview_highlights()
+            self.preview_status.setText(
+                f'{len(mesh.triangles):,} display / {mesh.source_triangles:,} source triangles'
+                ' · display-only quality; original file unchanged')
+        profile = getattr(mesh, 'load_profile', None)
+        details = profile.quality_reason if profile else 'Full detail'
+        self.statusBar().showMessage('Preview quality updated: ' + details)
 
     def _fit_perspective_grid(self):
         if not self.preview_surface.fit_perspective_grid():
@@ -2590,6 +2723,12 @@ class MainWindow(QMainWindow):
         self._invalidate_forecast()
 
     def _load_preview(self, path):
+        self._preview_quality_generation += 1
+        self._preview_quality_pending = False
+        if self._preview_quality_task is not None:
+            self._preview_quality_task.requestInterruption()
+        self._preview_quality_source_mesh = None
+        self._preview_quality_cache.clear()
         self._preview_serial += 1
         self._predicted_serial += 1  # obsolete predicted loads must not replace a different model
         self._original_mesh = None
@@ -2617,10 +2756,12 @@ class MainWindow(QMainWindow):
         self.preview_mode.setEnabled(False)
         self.reset_camera_button.setEnabled(False)
         self.preview_status.setText("Reading model geometry…")
-        task = ModelLoadWorker(path, self)
+        self._set_preview_quality_busy('Loading model geometry…')
+        task = ModelLoadWorker(path, self, quality=self._preview_quality)
         self._preview_threads.append(task)
         task.completed.connect(
-            lambda mesh, error, filename, s=serial: self._preview_loaded(s, filename, mesh, error))
+            lambda mesh, error, filename, s=serial, t=task:
+                self._preview_loaded(s, filename, mesh, error, t.source_mesh))
         task.finished.connect(lambda t=task: self._release_preview_task(t))
         task.start()
 
@@ -2629,17 +2770,25 @@ class MainWindow(QMainWindow):
             self._preview_threads.remove(task)
         task.deleteLater()
 
-    def _preview_loaded(self, serial, path, mesh, error):
+    def _preview_loaded(self, serial, path, mesh, error, source_mesh=None):
         if serial != self._preview_serial or path != self.state.model_path:
             return  # Ignore obsolete loads when a user selects a different file.
+        self._set_preview_quality_busy('')
         if error:
             self.preview_status.setText("Preview unavailable: " + error)
             self.bottom_hint.setText("Source selection retained; preview could not be loaded.")
             self.statusBar().showMessage("Model preview unavailable.")
             self.results_panel.record_event('Model preview', error, 'warning')
             return
+        self._preview_quality_source_mesh = source_mesh or mesh
+        profile = getattr(mesh, 'load_profile', None)
+        mode = profile.quality_mode if profile else self._preview_quality
+        self._preview_quality_cache[mode] = mesh
         self._original_mesh = mesh
         self.preview_surface.set_mesh(mesh)
+        if (getattr(mesh, "load_profile", None) is not None and
+                mesh.load_profile.quality_mode != self._preview_quality):
+            self._reload_preview_quality()
         if hasattr(self, 'preview_chrome'):
             self.preview_chrome.set_model(display_filename(path), len(mesh.triangles),
                                           mesh.source_triangles, sampled=mesh.sampled)
@@ -2657,7 +2806,11 @@ class MainWindow(QMainWindow):
         # This uses the authoritative engine/native color scanner, not just
         # render-time color averages or approximate visual gradients.
         self.filaments_panel.auto_load_source_colors()
-        suffix = ' · sampled display only' if mesh.sampled else ''
+        quality_profile = getattr(mesh, 'load_profile', None)
+        is_lod = bool(mesh.sampled and quality_profile and
+                      quality_profile.quality_effective != 'full')
+        suffix = (' · display-only LOD' if is_lod else
+                  ' · sampled display only' if mesh.sampled else '')
         info = f"{len(mesh.triangles):,} visible triangles / {mesh.source_triangles:,} source triangles{suffix}"
         self.preview_status.setText(info + ' · Left drag orbit · Right drag pan · Wheel zoom · R reset')
         self.bottom_hint.setText('Source geometry loaded. Refresh Forecast for read-only analysis or open Export to generate a native 3MF.')
