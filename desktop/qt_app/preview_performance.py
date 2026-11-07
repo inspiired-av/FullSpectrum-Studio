@@ -101,7 +101,8 @@ def _format_ms(value) -> str:
 
 
 def preview_performance_snapshot(mesh, *, upload_submit_ms=None,
-                                 upload_bytes=0, fallback_prepare_ms=None):
+                                 upload_bytes=0, fallback_prepare_ms=None,
+                                 upload_detail=None):
     """Stable, JSON-friendly presentation snapshot for the current viewport."""
     if mesh is None:
         return None
@@ -118,19 +119,39 @@ def preview_performance_snapshot(mesh, *, upload_submit_ms=None,
         'parse_ms': profile.parse_ms if profile else None,
         'prepare_ms': profile.prepare_ms if profile else fallback_prepare_ms,
         'upload_submit_ms': upload_submit_ms,
+        'upload_detail': dict(upload_detail) if upload_detail else None,
     }
 
 
 def format_preview_performance(snapshot) -> str:
     if not snapshot:
         return 'Open a model to view preview performance information.'
+    detail = snapshot.get('upload_detail') or {}
+    mode = detail.get('mode', 'direct')
+    if mode in ('split', 'raw-split'):
+        label = ('Raw split diagnostic (opt-in)' if mode == 'raw-split'
+                 else 'Split diagnostic (opt-in)')
+        upload_lines = (
+            f"GPU upload mode: {label}\n"
+            f"Pointer preparation: {_format_ms(detail.get('pointer_ms'))}\n"
+            f"GPU allocation submission: {_format_ms(detail.get('allocation_ms'))}\n"
+            f"GPU transfer submission: {_format_ms(detail.get('transfer_ms'))}\n")
+    else:
+        label = ('Raw direct diagnostic (opt-in)' if mode == 'raw-direct'
+                 else 'Direct (default)')
+        upload_lines = (
+            f"GPU upload mode: {label}\n"
+            f"Pointer preparation: {_format_ms(detail.get('pointer_ms'))}\n"
+            f"Combined GPU allocation/transfer submission: "
+            f"{_format_ms(detail.get('direct_ms'))}\n")
     return (
         f"Source triangles: {snapshot['source_triangles']:,}\n"
         f"Drawn triangles: {snapshot['triangles']:,}\n"
         f"Vertices: {snapshot['vertices']:,}\n\n"
         f"Model parsing: {_format_ms(snapshot['parse_ms'])}\n"
         f"CPU geometry preparation: {_format_ms(snapshot['prepare_ms'])}\n"
-        f"GPU upload submission: {_format_ms(snapshot['upload_submit_ms'])}\n\n"
+        f"GPU upload submission: {_format_ms(snapshot['upload_submit_ms'])}\n"
+        f"{upload_lines}\n"
         f"Estimated decoded mesh: {_format_mib(snapshot['cpu_mesh_bytes'])}\n"
         f"Expanded CPU vertex buffer: {_format_mib(snapshot['render_buffer_bytes'])}\n"
         f"Allocated model GPU vertex buffer: {_format_mib(snapshot['gpu_buffer_bytes'])}\n"

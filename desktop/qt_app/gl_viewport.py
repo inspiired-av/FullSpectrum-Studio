@@ -24,6 +24,7 @@ from desktop.qt_app.plate_mesh import combined_scene_bounds
 from desktop.qt_app.plate_mesh import plate_offset, scene_clip_planes
 import ctypes
 import math
+import os
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QMatrix4x4, QVector3D, QSurfaceFormat
@@ -169,6 +170,12 @@ class ModelViewport(QOpenGLWidget):
         self.setMouseTracking(True)
         self._mesh=None;self._data=None;self._dirty=False;self._verts=0
         self._preview_upload_ms=None;self._preview_upload_bytes=0
+        self._preview_upload_detail=None
+        self._preview_upload_mode=os.environ.get(
+            'FULLSPECTRUM_PREVIEW_UPLOAD', 'direct').strip().lower()
+        if self._preview_upload_mode not in (
+                'direct', 'split', 'raw-direct', 'raw-split'):
+            self._preview_upload_mode='direct'
         self._preview_fallback_prepare_ms=None
         self._gl=None;self._program=0;self._vao=0;self._vbo=0;self._error=''
         self._influence_data=None;self._influence_texture=0;self._influence_dirty=False
@@ -203,12 +210,14 @@ class ModelViewport(QOpenGLWidget):
         return preview_performance_snapshot(
             self._mesh, upload_submit_ms=self._preview_upload_ms,
             upload_bytes=self._preview_upload_bytes,
-            fallback_prepare_ms=self._preview_fallback_prepare_ms)
+            fallback_prepare_ms=self._preview_fallback_prepare_ms,
+            upload_detail=self._preview_upload_detail)
 
     def set_mesh(self,mesh,*,preserve_camera=False):
         self._mesh=mesh
         self._preview_upload_ms=None
         self._preview_upload_bytes=0
+        self._preview_upload_detail=None
         self._preview_fallback_prepare_ms=None
         # Prefer geometry prepared by ModelLoadWorker so the UI remains responsive.
         prepare_start = perf_counter()
@@ -395,11 +404,58 @@ class ModelViewport(QOpenGLWidget):
         require_upload_budget(size)
         if count and self._data.itemsize != ctypes.sizeof(ctypes.c_float):
             raise ValueError("Preview render buffer must contain float32 values")
+        # Pointer binding is timed separately from driver calls. No CPU
+        # float32 copy is made here, and the array remains alive in self._data.
+        pointer_start=perf_counter()
         pointer=(ctypes.c_float*count).from_buffer(self._data) if count else None
+        pointer_ms=(perf_counter()-pointer_start)*1000.0
+        mode=getattr(self, '_preview_upload_mode', 'direct')
+        if mode not in ('direct', 'split', 'raw-direct', 'raw-split'):
+            mode='direct'
+        # Diagnostic only. The raw GL entrypoints skip PyOpenGL's
+        # array FormatHandler/wrapper; they do not change byte layout.
+        if mode.startswith('raw-'):
+            from OpenGL.raw.GL.VERSION.GL_1_5 import (
+                glBufferData as upload_data,
+                glBufferSubData as upload_subdata)
+            upload_pointer=(ctypes.cast(pointer, ctypes.c_void_p)
+                            if pointer is not None else None)
+        else:
+            upload_data=gl.glBufferData
+            # Direct uploads only require glBufferData. Defer looking up
+            # glBufferSubData until a split transfer is actually selected.
+            upload_subdata=gl.glBufferSubData if mode == 'split' else None
+            upload_pointer=pointer
         upload_start=perf_counter()
-        gl.glBufferData(gl.GL_ARRAY_BUFFER,size,pointer,gl.GL_STATIC_DRAW)
+        direct_ms=None
+        allocation_ms=None
+        transfer_ms=None
+        if mode in ('split', 'raw-split'):
+            # Opt-in diagnostic: allocate orphaned storage, then fill it.
+            # Do not force glFinish/glGet* synchronization here.
+            allocation_start=perf_counter()
+            upload_data(gl.GL_ARRAY_BUFFER,size,None,gl.GL_STATIC_DRAW)
+            allocation_ms=(perf_counter()-allocation_start)*1000.0
+            if size:
+                transfer_start=perf_counter()
+                upload_subdata(gl.GL_ARRAY_BUFFER,0,size,upload_pointer)
+                transfer_ms=(perf_counter()-transfer_start)*1000.0
+        else:
+            # Default uses the same one-call glBufferData wrapper.
+            # The raw variant differs only in entrypoint/argument conversion.
+            direct_start=perf_counter()
+            upload_data(gl.GL_ARRAY_BUFFER,size,upload_pointer,gl.GL_STATIC_DRAW)
+            direct_ms=(perf_counter()-direct_start)*1000.0
         self._preview_upload_ms=(perf_counter()-upload_start)*1000.0
+        if mode.startswith('raw-'):
+            # Raw entrypoints skip PyOpenGL's normal error wrapper.
+            error=gl.glGetError()
+            if error!=gl.GL_NO_ERROR:
+                raise RuntimeError(f'Raw preview GPU upload GL error: 0x{error:04X}')
         self._preview_upload_bytes=size
+        self._preview_upload_detail={
+            'mode':mode, 'pointer_ms':pointer_ms, 'direct_ms':direct_ms,
+            'allocation_ms':allocation_ms, 'transfer_ms':transfer_ms}
         gl.glEnableVertexAttribArray(0)
         gl.glVertexAttribPointer(0,3,gl.GL_FLOAT,gl.GL_FALSE,48,ctypes.c_void_p(0))
         gl.glEnableVertexAttribArray(1)
