@@ -41,7 +41,9 @@ class LargeMeshSafetyTests(unittest.TestCase):
     def test_worker_prepares_gpu_off_gui_thread(self):
         root = Path(__file__).resolve().parents[1]
         worker = (root / 'desktop/qt_app/preview_worker.py').read_text(encoding='utf-8')
-        self.assertIn('render_buffer=flatten_faces(result)', worker)
+        self.assertIn('render_buffer = flatten_faces(result)', worker)
+        self.assertIn('render_buffer=render_buffer', worker)
+        self.assertIn('self.completed.emit(result, None, self.path)', worker)
         window = (root / 'desktop/qt_app/main_window.py').read_text(encoding='utf-8')
         # The palette panel now accepts an optional viewport width. Assert the
         # method exists instead of freezing its positional argument signature.
