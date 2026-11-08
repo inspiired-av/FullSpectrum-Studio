@@ -810,11 +810,22 @@ class FilamentsTab(QWidget):
                                  f'Found {len(self.source_colors)} source colors in the selected model.')
         kind = getattr(data, 'source_kind', None)
         self._source_kind=kind
-        native = kind in ('native_object_colors', 'native_painted_faces')
+        self.solid_table.setHorizontalHeaderLabels([
+            'Source color',
+            'Surface (mm²)' if kind=='native_split_surface_area' else 'Faces',
+            'Assigned filament'])
+        native = kind in ('native_object_colors', 'native_painted_faces',
+                          'native_split_surface_area')
         self.protected_intro.setObjectName('templateWarning' if native else 'bodyMuted')
         self.protected_intro.style().unpolish(self.protected_intro)
         self.protected_intro.style().polish(self.protected_intro)
-        if kind == 'native_painted_faces':
+        if kind == 'native_split_surface_area':
+            self.protected_intro.setText(
+                'Bambu/Orca split-painted project: these are calculated '
+                'mesh surface areas in mm², not face counts or filament usage. '
+                'Native colors are preview-only: source-color protection is not '
+                'supported by the native-project forecast/export optimizer.')
+        elif kind == 'native_painted_faces':
             self.protected_intro.setText(
                 'Bambu/Orca painted project: colors include face-painted and '
                 'object-assigned filaments. Counts describe whole triangles with '
@@ -846,7 +857,9 @@ class FilamentsTab(QWidget):
             item.setForeground(QColor('#101418') if QColor(hexcolor).lightness()>140 else QColor('#ffffff'))
             item.setBackground(QColor(hexcolor))
             self.solid_table.setItem(row,0,item)
-            self.solid_table.setItem(row,1,QTableWidgetItem(str(count)))
+            shown = (f'{count:,.3f}' if self._source_kind=='native_split_surface_area'
+                     else str(count))
+            self.solid_table.setItem(row,1,QTableWidgetItem(shown))
             key=self.preferences.solid_assignments.get(hexcolor)
             match=next((o for o in self.options if o['key']==key),None)
             text=(match.get('name') or key) if match else ('Not protected' if not key else 'Unavailable filament')

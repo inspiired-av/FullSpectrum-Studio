@@ -310,9 +310,32 @@ def build_quality_preview(mesh, mode='auto', *, max_seconds=8.0, cancelled=None)
         return QualityResult(mesh, normalize_quality(mode), 'full', original,
                              original, 0., 'Cancelled before LOD preparation')
     resolved = choose_quality(mode, original)
+    # 3MF_SPLIT_PAINT_STAGE1: do not decimate the tessellated paint tree
+    # with LOD algorithms that do not yet preserve provenance/seams.
+    if getattr(mesh, 'split_painted_faces', 0) and resolved != 'full':
+        return QualityResult(mesh, normalize_quality(mode), 'full', original,
+                             original, (perf_counter()-start)*1000.,
+                             'Native split-face paint requires full-detail preview')
     if resolved == 'full' or original < 150:
         return QualityResult(mesh, normalize_quality(mode), resolved, original,
                              original, 0., 'Full source geometry')
+    # EXPERIMENTAL_MULTICOLOR_LOD_ROUTER (opt-in; full-detail unchanged)
+    if os.environ.get('FULLSPECTRUM_MULTICOLOR_LOD', '').strip().lower() == 'connected':
+        from desktop.qt_app.preview_multicolor_lod import build_adaptive_multicolor_lod
+        # This is deliberately experimental, not the default color-quality path.
+        try:
+            candidate = build_adaptive_multicolor_lod(
+                mesh, resolved, max_seconds=max(12.,float(max_seconds)),
+                cancelled=cancelled)
+            effective = resolved if candidate.draw_faces < original else 'full'
+            return QualityResult(candidate.mesh, normalize_quality(mode), effective,
+                                 original, candidate.draw_faces,
+                                 candidate.duration_ms, candidate.reason)
+        except Exception as exc:
+            # Malformed model/native-side errors must not disable the source.
+            return QualityResult(mesh, normalize_quality(mode), 'full',
+                                 original, original, 0.,
+                                 f'Experimental LOD unavailable: {type(exc).__name__}: {exc}')
     ratio = .70 if resolved == 'balanced' else .45
     target = max(1, round(original * ratio))
     import numpy as np

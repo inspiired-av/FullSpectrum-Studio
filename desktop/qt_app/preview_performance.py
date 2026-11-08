@@ -49,7 +49,9 @@ def preview_resource_estimate(mesh) -> PreviewResourceEstimate:
     vertices = len(mesh.vertices)
     triangles = len(mesh.triangles)
     source = int(mesh.source_triangles)
-    if vertices < 0 or triangles < 0 or source < triangles:
+    # Paint tree tessellation legitimately has more display than source faces.
+    if (vertices < 0 or triangles < 0 or source < 0 or
+            (source < triangles and not getattr(mesh, 'split_painted_faces', 0))):
         raise ValueError('Invalid preview triangle/vertex counts')
     colors = len(getattr(mesh, 'face_colors', ()) or ())
     corner_colors = len(getattr(mesh, 'corner_colors', ()) or ())
@@ -128,6 +130,8 @@ def preview_performance_snapshot(mesh, *, upload_submit_ms=None,
         'quality_effective': profile.quality_effective if profile else 'full',
         'quality_source_triangles': profile.quality_source_triangles if profile else estimate.triangles,
         'quality_reason': profile.quality_reason if profile else '',
+        'native_split_faces': getattr(mesh, 'split_painted_faces', 0),
+        'native_split_regions': getattr(mesh, 'split_paint_regions', 0),
         'upload_submit_ms': upload_submit_ms,
         'upload_detail': dict(upload_detail) if upload_detail else None,
     }
@@ -167,10 +171,15 @@ def format_preview_performance(snapshot) -> str:
             f"{_format_ms(detail.get('direct_ms'))}\n")
     if detail.get('indexed_fallback'):
         upload_lines += f"Indexed upload fell back to Direct: {detail['indexed_fallback']}\n"
+    # The subdivision count is additional display geometry, not source faces.
+    split_summary = (f"Split-painted source faces: {snapshot['native_split_faces']:,}\n"
+                     f"Paint display regions: {snapshot['native_split_regions']:,}\n"
+                     if snapshot.get('native_split_faces') else '')
     return (
         f"Source triangles: {snapshot['source_triangles']:,}\n"
         f"Drawn triangles: {snapshot['triangles']:,}\n"
-        f"Vertices: {snapshot['vertices']:,}\n\n"
+        f"Vertices: {snapshot['vertices']:,}\n"
+        f"{split_summary}\n"
         f"Model parsing: {_format_ms(snapshot['parse_ms'])}\n"
         f"CPU geometry preparation: {_format_ms(snapshot['prepare_ms'])}\n"
         f"Preview quality: {snapshot.get('quality_mode', 'auto').title()} → {snapshot.get('quality_effective', 'full').title()}\n"

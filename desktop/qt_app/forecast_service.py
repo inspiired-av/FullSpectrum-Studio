@@ -120,6 +120,38 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
             from desktop.qt_app.forecast_preview_assets import load_forecast_previews
             preview_meshes, preview_note = load_forecast_previews(
                 output.get('analysisAssets'), analysis_root)
+            # NATIVE_SPLIT_FORECAST_STAGE1_2: The engine's plan-only native OBJ
+            # uses ONE representative slot per original painted triangle.
+            # Exact slicer export retains split paint. For strict/unambiguous
+            # native swatches, overlay the same decoded facets as the Qt Original
+            # view, including their source-slot provenance for Influence.
+            split_overlay = False
+            if path.suffix.lower() == '.3mf' and output.get('analysisAssets'):
+                try:
+                    from desktop.qt_app.native_split_forecast_preview import (
+                        enabled as split_enabled, has_native_split_paint,
+                        build_overlays as build_native_split_overlays)
+                    if has_native_split_paint(path):
+                        if split_enabled():
+                            overlays, slot_map = build_native_split_overlays(
+                                path, output, analysis_root)
+                            preview_meshes.update(overlays)
+                            analysis_assets = dict(output['analysisAssets'])
+                            analysis_assets['sourceSlotMap'] = slot_map
+                            output['analysisAssets'] = analysis_assets
+                            split_overlay = True
+                            preview_note = (preview_note + ' ' if preview_note else '') + (
+                                'Native split-painted forecast uses the complete decoded '
+                                'display facets. Export remains authoritative.')
+                        else:
+                            preview_note = (preview_note + ' ' if preview_note else '') + (
+                                'Native split-paint details are approximated in this '
+                                'Predicted preview. Set FULLSPECTRUM_NATIVE_SPLIT_FORECAST=1 '
+                                'and restart for experimental facet-exact display.')
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    preview_note = (preview_note + ' ' if preview_note else '') + (
+                        'Native split-paint preview was not verified: ' + str(exc) +
+                        '. Existing forecast preview is approximate.')
             if preview_meshes.get('influence'):
                 try:
                     from desktop.qt_app.anchor_influence import prepare_influence
@@ -127,6 +159,17 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
                         output.get('analysisAssets'), analysis_root,
                         preview_meshes['influence'], output.get('recipes'),
                         output.get('anchors'), output.get('sourceSlots'))
+                    if split_overlay:
+                        # Influence replaces sourceTag.r with original SLOT IDs.
+                        # Build lossless index candidates AFTER this mutation;
+                        # otherwise Indexed Direct would upload stale RGB tags.
+                        from dataclasses import replace
+                        from desktop.qt_app.preview_indexed_mode import prepare_indexed_preview
+                        influence_mesh = preview_meshes['influence']
+                        preview_meshes['influence'] = replace(
+                            influence_mesh,
+                            render_indexed=prepare_indexed_preview(
+                                influence_mesh.render_buffer))
                 except (ValueError, OSError, TypeError, KeyError) as exc:
                     # A provenance error disables interactive influence only.
                     # Predicted and color-loss forecasts are still valid.

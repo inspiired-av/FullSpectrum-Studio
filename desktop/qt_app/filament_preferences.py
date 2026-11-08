@@ -167,13 +167,30 @@ def scan_source_colors(filename):
     try:
         counts = scan_native_object_colors(path)
     except (OSError, ValueError, KeyError, TypeError) as exc:
+        # 3MF_SPLIT_PAINT_VERIFICATION_STAGE1_1: The legacy scanner only accepts
+        # flat native paint leaves. A valid split-paint tree must instead be
+        # verified by the SAME strict decoder used for the read-only preview.
+        # Keep all unrelated scanner failures (invalid part mappings, mixed
+        # recipes, etc.) as errors. Do not treat display swatches as printable
+        # filament consumption or unlock native-project source protection.
+        reason=str(exc)
+        is_split_code=(isinstance(exc, ValueError) and
+            ('paint state' in reason.lower() or 'split-region' in reason.lower()))
+        if is_split_code:
+            from desktop.qt_app.native_split_color_area import split_source_surface_areas
+            try:
+                areas=split_source_surface_areas(path)
+            except (OSError, ValueError, KeyError, TypeError) as split_error:
+                reason += '; split-paint verification: ' + str(split_error)
+            else:
+                return SourceColorCounts(areas,'native_split_surface_area')
         raise ValueError(
             'No supported source colors were found. Standard material-colored 3MFs use '
             'face-level materials; Bambu/Orca projects can also assign a single '
             'physical filament to each object. Simple single-state Bambu facet '
             'paint is supported; complex split-region paint and mixed-filament '
-            'states are not safely countable by this scanner. '
-            f'Details: {exc}'
+            'states require complete decoding to verify source colors. '
+            f'Details: {reason}'
         ) from exc
     kind = 'native_painted_faces' if getattr(counts, 'has_painted_faces', False) else 'native_object_colors'
     return SourceColorCounts(counts, kind)

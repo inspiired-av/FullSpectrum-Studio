@@ -11,6 +11,7 @@ from collections import Counter
 import re
 from pathlib import Path
 from zipfile import ZipFile, BadZipFile
+from desktop.qt_app.preview_3mf_part_assignments import read_native_part_defaults
 from xml.etree import ElementTree as ET
 import math
 import json
@@ -41,6 +42,8 @@ class PreviewMesh:
     corner_colors: tuple = ()  # exact (color1,color2,color3) per triangle, for GPU interpolation
     load_profile: object = field(default=None, compare=False, repr=False)  # preview-only telemetry
     render_indexed: object = field(default=None, compare=False, repr=False)  # opt-in GPU candidate
+    split_painted_faces: int = 0  # native source faces bearing subdivision trees
+    split_paint_regions: int = 0  # rendered facets originating from those faces
 
     @property
     def sampled(self):
@@ -110,6 +113,7 @@ def _mesh_parts(obj, palette=None, default_color=None, native_colors=(), stats=N
     meshes = [child for child in obj if _local(child.tag) == 'mesh']
     for mesh in meshes:
         vertices=[]; triangles=[]; face_colors=[]; corner_colors=[]
+        vertex_lookup=None  # allocated only for an actually subdivided native face
         for elem in mesh.iter():
             what=_local(elem.tag)
             if what == 'vertex':
@@ -127,6 +131,8 @@ def _mesh_parts(obj, palette=None, default_color=None, native_colors=(), stats=N
                     t=tuple(int(elem.get(k)) for k in ('v1','v2','v3'))
                 except (ValueError,TypeError) as exc:
                     raise ValueError('Invalid 3MF triangle index') from exc
+                # 3MF_SPLIT_PAINT_STAGE1: count original mesh triangles
+                if stats is not None:stats['original_triangles']+=1
                 hex_color=None
                 corners=None
                 pid=elem.get('pid') or obj.get('pid')
@@ -147,13 +153,47 @@ def _mesh_parts(obj, palette=None, default_color=None, native_colors=(), stats=N
                         if stats is not None:stats['unresolved']+=1
                 elif native_colors:
                     code=elem.get('paint_color')
-                    if code is None:hex_color=default_color
+                    if code is None:
+                        hex_color=default_color
                     else:
+                        # 3MF_SPLIT_PAINT_STAGE1: display-only native split paint.
+                        # A complex paint code describes a tessellated facet tree,
+                        # not a single material or an average RGB value.
+                        from desktop.qt_app.preview_3mf_split_paint import (
+                            decode_paint_regions, PaintDecodeError)
                         try:
-                            from desktop.qt_app.native_object_colors import _single_painted_slot
-                            slot=_single_painted_slot(code,len(native_colors))
-                            hex_color=native_colors[slot-1]
-                        except ValueError:
+                            if any(i < 0 or i >= len(vertices) for i in t):
+                                raise PaintDecodeError('Invalid native painted face index')
+                            facets=decode_paint_regions(
+                                tuple(vertices[idx] for idx in t),code,len(native_colors))
+                            if len(facets) > 1:
+                                if len(triangles)+len(facets)>MAX_DRAW_TRIANGLES:
+                                    raise ValueError('Split-face paint exceeds the safe preview triangle limit')
+                                if vertex_lookup is None:
+                                    vertex_lookup={point:i for i,point in enumerate(vertices)}
+                                for region in facets:
+                                    indices=[]
+                                    for point in region.points:
+                                        idx=vertex_lookup.get(point)
+                                        if idx is None:
+                                            idx=len(vertices)
+                                            vertices.append(point)
+                                            vertex_lookup[point]=idx
+                                        indices.append(idx)
+                                    paint=(native_colors[region.slot-1]
+                                           if region.slot else default_color)
+                                    triangles.append(tuple(indices))
+                                    face_colors.append(paint)
+                                    corner_colors.append((paint,)*3)
+                                if stats is not None:
+                                    stats['split_faces']+=1
+                                    stats['split_regions']+=len(facets)
+                                continue
+                            slot=facets[0].slot
+                            hex_color=native_colors[slot-1] if slot else default_color
+                        except PaintDecodeError:
+                            # Do not pretend that an undecodable split face has
+                            # one uniform color. Show neutral and disclose it.
                             if stats is not None:stats['unresolved']+=1
                 else:hex_color=default_color
                 triangles.append(t)
@@ -249,10 +289,18 @@ def _build_mesh(vertices, triangles, name, face_colors=None, stats=None, corner_
     else:parts.append('No explicit source colors detected')
     if stats.get('unresolved'):parts.append(f"{stats['unresolved']:,} unsupported/unknown faces rendered neutral")
     if stats.get('blended'):parts.append(f"{stats['blended']:,} interpolated vertex-color faces")
-    return PreviewMesh(tuple(vertices),tuple(triangles),count,
+    if stats.get('split_faces'):
+        parts.append(f"{stats['split_faces']:,} split-painted source faces → "
+                     f"{stats['split_regions']:,} display regions (read-only)")
+    # Source mesh triangles may be FEWER than display triangles when
+    # Bambu/Orca paint splits a single facet into smaller paint regions.
+    source_count=stats.get('original_triangles',count)
+    return PreviewMesh(tuple(vertices),tuple(triangles),source_count,
                        (minx,miny,minz,maxx,maxy,maxz),name,
                        tuple(face_colors or ()),palette_counts,' · '.join(parts),
-                       corner_colors=tuple(corner_colors or ()))
+                       corner_colors=tuple(corner_colors or ()),
+                       split_painted_faces=stats.get('split_faces',0),
+                       split_paint_regions=stats.get('split_regions',0))
 
 
 def load_3mf(path):
@@ -268,6 +316,7 @@ def load_3mf(path):
             root,objects=_objects(_safe_member(z,'3D/3dmodel.model'))
             scale=_unit_scale(root)
             native_defaults,native_colors=_native_defaults(z,root)
+            native_part_defaults=read_native_part_defaults(z,native_colors)
             cache={'3D/3dmodel.model':(root,objects)}
             active=set()
             total_v=0;total_t=0
@@ -307,8 +356,13 @@ def load_3mf(path):
                             # Relative paths are interpreted against the parent .model.
                             if raw and not raw.startswith('/'):
                                 child_member=_safe_path(posixpath.join(posixpath.dirname(member),raw))
+                            # Explicit slicer part extruders override the parent default;
+                            # standard 3MF material properties and face paint still
+                            # override this default inside _mesh_parts.
+                            part_default=native_part_defaults.get(
+                                (obj_id,comp.attrib['objectid']),default_color)
                             walk(child_member,comp.attrib['objectid'],
-                                 _compose(transform,_matrix(comp.get('transform'))),depth+1,default_color)
+                                 _compose(transform,_matrix(comp.get('transform'))),depth+1,part_default)
                 finally:
                     active.remove(reference)
 

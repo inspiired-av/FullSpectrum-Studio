@@ -3392,8 +3392,15 @@ class MainWindow(QMainWindow):
         colors = len(palette)
         faces = sum(count for _, count in palette)
         if palette:
-            self.source_palette_message.setText(
-                f'{colors:,} source colors · {faces:,} colored faces')
+            if getattr(mesh, 'split_painted_faces', 0):
+                # 3MF_SPLIT_PAINT_VERIFICATION_STAGE1_1: Counts are expanded
+                # display tessellation, not original slicer mesh triangles.
+                self.source_palette_message.setText(
+                    f'{colors:,} source colors · {mesh.source_triangles:,} source triangles · '
+                    f'{faces:,} colored display facets')
+            else:
+                self.source_palette_message.setText(
+                    f'{colors:,} source colors · {faces:,} colored faces')
         else:
             self.source_palette_message.setText(
                 getattr(mesh, 'color_status', 'No source colors available'))
