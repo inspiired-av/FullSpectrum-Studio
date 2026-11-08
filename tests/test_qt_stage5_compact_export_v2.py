@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from zipfile import ZipFile
 
 ROOT=Path(__file__).resolve().parents[1]
 QT=ROOT/'desktop'/'qt_app'
@@ -96,7 +97,19 @@ class Stage5VisualQtTests(unittest.TestCase):
             self.assertFalse(w.results_panel.session_toggle.icon().isNull())
             self.assertFalse(w.results_panel.copy_activity_button.icon().isNull())
             self.assertFalse(w.results_panel.diagnostics_collapse.icon().isNull())
+            # No source is loaded: there is no actionable template warning.
+            self.assertFalse(w.template_attention.isVisibleTo(w))
+            # A generic 3MF without slicer settings DOES require a template.
+            # Selecting the source in ShellState avoids starting preview workers.
+            generic = Path(tmp) / 'generic_source.3mf'
+            with ZipFile(generic, 'w') as archive:
+                archive.writestr('3D/3dmodel.model', '<model/>')
+            self.assertTrue(w.state.select_model(str(generic)))
+            w._refresh_template_status()
+            w._update_export_template_attention()
+            self.app.processEvents()
             self.assertTrue(w.template_attention.isVisibleTo(w))
+            self.assertFalse(w.template_warning_panel.isVisibleTo(w))
             w.template_attention.click();self.app.processEvents()
             self.assertTrue(w.template_warning_panel.isVisibleTo(w))
             self.assertFalse(w.export_advanced_panel.isVisibleTo(w))

@@ -3552,6 +3552,15 @@ def validate_output_archive(outfile,newn,real_count,layouts,source_off_diagonal_
             preservation_result["paintRemapVerified"]=expected_paint_counts is not None
     return paint_codes, usage, preservation_result, color_validation
 
+def _write_utf8_report(path, contents):
+    """Write human-readable exports with a portable Unicode encoding.
+
+    Native area-weighting warnings include mm². Using Windows' default cp1252
+    produces 0xB2, which the Qt publisher correctly rejects as non-UTF-8.
+    """
+    Path(path).write_text(contents, encoding='utf-8')
+
+
 def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=True, real_slots="auto",
             reference=None, custom_catalog_path=None, quality_bias=DEFAULT_QUALITY_BIAS,
             mix_model="bambu", analysis_dir=None, texture_override=None,
@@ -3734,8 +3743,38 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             protected_slots=require_protected_slots(imported,solid_color_overrides)
             paint_usage=paint_slot_usage(code_counts,oldn)
             paint_usage=include_model_extruder_usage(paint_usage,object_extruders)
+        # NATIVE_AREA_PAINT_WEIGHTS_STAGE1_3: Display-facet geometric area is
+        # a stricter native source color weight than TriangleSelector leaf counts.
+        # Default for verified native sources; opt out with env=0.
+        # Safe legacy fallback, no export geometry changes.
+        native_area_active=False
+        if infile.suffix.lower()=='.3mf' and not generic_input:
+            from desktop.qt_app.native_area_planning import enabled as native_area_enabled
+            if native_area_enabled():
+                try:
+                    from desktop.qt_app.native_area_planning import native_surface_slot_weights
+                    native_areas=native_surface_slot_weights(project_file,old)
+                except (OSError,ValueError,TypeError,KeyError,IndexError,OverflowError) as exc:
+                    warnings.append(
+                        'Native surface-area weighting unavailable; using legacy '
+                        'face/paint-state weights instead: '+str(exc)[:240])
+                else:
+                    paint_usage=Counter(native_areas)
+                    native_area_active=True
+                    warnings.append(
+                        'Native colors weighted by decoded geometric surface area '
+                        '(mm², not sliced filament volume or material consumption).')
+            else:
+                warnings.append('Native paint-area weighting disabled; using legacy paint-state counts.')
         reference_result=analyze_reference(reference,reference_tmp) if reference else None
         usage=paint_usage
+        if native_area_active and planning_sample=='preview':
+            # The old optimized-preview sample contains FACE COUNTS; blending
+            # those directly with mm² would silently corrupt color weighting.
+            planning_sample='paint'
+            warnings.append(
+                'Preview-face-count weighting replaced with exact decoded '
+                'surface-area weighting for this native 3MF.')
         if direct_source is not None and planning_sample=="preview":
             # Stage preview slot IDs do not correspond to unquantized source IDs.
             # Surface-area/visibility weights can be added in a later milestone.
@@ -4158,7 +4197,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                 "anchorInfluenceMesh":str(influence) if influence else None,
             }
 
-        with open(csvfile,"w",newline="") as f:
+        with open(csvfile,"w",newline="",encoding="utf-8") as f:
             w=csv.writer(f)
             w.writerow(["old_slot","new_slot","target_color","kind","recipe_label","component_ids","ratios","bambu_reconstructed_color","estimated_deltaE","direct_deltaE","visual_gain"])
             w.writerows(rows)
@@ -4182,7 +4221,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
                 "ratios":ratio_text,
             })
         color_validation["recipes"]=color_debug
-        color_report.write_text("\n".join([
+        _write_utf8_report(color_report,"\n".join([
             "# Color Validation",
             "",
             f"Output: `{outfile.name}`",
@@ -4216,7 +4255,7 @@ def convert(infile, mode, palette_source="inventory", output_dir=None, reveal=Tr
             if quality_bias_mode=="auto"
             else f"Quality versus waste priority: {quality_bias} / 100"
         )
-        report.write_text("\n".join([
+        _write_utf8_report(report,"\n".join([
             "FullSpectrum Studio conversion and validation report",
             f"Mode: {mode}",
             f"Input: {infile.name}",

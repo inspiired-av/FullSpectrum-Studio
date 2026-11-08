@@ -31,7 +31,7 @@ class ResponsiveExportContracts(unittest.TestCase):
         self.assertIn('export_viewport_resized.connect(self._update_export_layout)', main)
         self.assertIn('export_viewport_resized = Signal(int)', results)
         self.assertIn('self.export_viewport_resized.emit(', results)
-        self.assertIn("self.export_preferences_caption.setVisible(not compact)", main)
+        self.assertIn("self.export_preferences_caption.setVisible(True)", main)
         self.assertIn('launch_modes = QGridLayout()', main)
 
 
@@ -104,7 +104,9 @@ class ResponsiveExportQtTests(unittest.TestCase):
         self.assert_visible_controls_inside_viewport(w,
             ('slicer_executable_auto', 'slicer_executable_custom',
              'export_save_settings_button', 'export_revert_settings_button'))
-        self.assertFalse(w.export_preferences_caption.isVisibleTo(w))
+        # The Stage 1.4.1 pending-changes summary is intentionally
+        # visible at narrow widths; hiding it was the old contract.
+        self.assertTrue(w.export_preferences_caption.isVisibleTo(w))
         self.assertEqual(w._export_launch_modes.itemAtPosition(1, 0).widget(),
                          w.slicer_executable_custom)
 

@@ -52,6 +52,9 @@ from desktop.qt_app.preview_worker import ModelLoadWorker
 from desktop.qt_app.forecast_worker import ForecastWorker
 from desktop.qt_app.export_worker import ExportWorker
 from desktop.qt_app.export_service import make_export_request
+from desktop.qt_app.export_pending_settings import summarize_pending
+from desktop.qt_app.preview_scale_check import scale_warning
+from desktop.qt_app.export_template_policy import template_requirement
 from desktop.slicer_launcher import find_windows_slicer
 from desktop.qt_app.forecast_service import make_request
 from desktop.qt_app.forecast_view_state import ForecastViewState
@@ -486,6 +489,13 @@ class MainWindow(QMainWindow):
         self.preview_quality_activity.hide()
         self.preview_status = _label("Open a 3MF, OBJ or GLB model to view its geometry.", "helpText", wrap=True)
         model_layout.addWidget(self.preview_status)
+        # Physical scale is advisory for unitless OBJ and raw GLB coordinates.
+        # Never change source units, mesh vertices or export geometry here.
+        self.preview_scale_notice = _label('', 'templateWarning', wrap=True)
+        self.preview_scale_notice.setObjectName('previewScaleNotice')
+        self.preview_scale_notice.setStyleSheet('color: #edbf73;')
+        self.preview_scale_notice.hide()
+        model_layout.addWidget(self.preview_scale_notice)
         # A compact in-viewport key is easier to read than an inline footnote.
         # It is a Qt child overlay; no texture, geometry or OpenGL change.
         self.preview_legend = ColorLossLegend(self.preview_surface)
@@ -1057,6 +1067,21 @@ class MainWindow(QMainWindow):
         self.slicer_executable_auto.toggled.connect(self._automatic_slicer_mode_selected)
         self.slicer_executable_custom.toggled.connect(self._custom_slicer_mode_selected)
         advanced_col.addWidget(self.slicer_executable_row)
+        # FULLSPECTRUM_STAGE_1_3_1_4: Optional reports affect publication only;
+        # engine validation continues generating all diagnostics in staging.
+        advanced_col.addWidget(_label('ADDITIONAL OUTPUT FILES', 'sectionTitle'))
+        self.export_recipe_csv = QCheckBox('Recipe CSV (.csv)')
+        self.export_report_txt = QCheckBox('Conversion report (.txt)')
+        self.export_validation_md = QCheckBox('Color validation report (.md)')
+        for checkbox, field, detail in (
+            (self.export_recipe_csv, 'export_recipe_csv', 'Recipe and filament mapping data'),
+            (self.export_report_txt, 'export_report_txt', 'Human-readable conversion report'),
+            (self.export_validation_md, 'export_validation_md', 'Detailed color validation findings'),
+        ):
+            checkbox.setObjectName(field)
+            checkbox.setChecked(self.plan_preferences.get(field))
+            checkbox.setToolTip(detail + '. Unchecking does not disable 3MF validation.')
+            advanced_col.addWidget(checkbox)
         self.export_advanced_toggle.toggled.connect(self.export_advanced_panel.setVisible)
         self.export_advanced_panel.hide()
         col.addWidget(self.export_advanced_panel)
@@ -1066,12 +1091,18 @@ class MainWindow(QMainWindow):
         self.export_preferences_row = QWidget()
         self.export_preferences_row.setMinimumWidth(0)
         self.export_preferences_row.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        # A narrow export sidebar must not collapse these controls to zero.
+        self.export_preferences_row.setMinimumHeight(114)
         preference_buttons = QVBoxLayout(self.export_preferences_row)
         preference_buttons.setContentsMargins(0, 0, 0, 0)
         preference_buttons.setSpacing(4)
         self.export_preferences_caption = _label('UNSAVED SETTINGS', 'sectionTitle')
         preference_buttons.addWidget(self.export_preferences_caption)
+        self.export_pending_details = _label('', 'helpText', wrap=True)
+        self.export_pending_details.setObjectName('exportPendingChanges')
+        self.export_pending_details.setToolTip('Edits are not saved until you choose Save Settings.')
+        preference_buttons.addWidget(self.export_pending_details)
         preference_actions = QHBoxLayout()
         preference_actions.setContentsMargins(0, 0, 0, 0)
         preference_actions.setSpacing(7)
@@ -1081,16 +1112,18 @@ class MainWindow(QMainWindow):
         self.export_save_settings_button.setMinimumHeight(34)
         self.export_save_settings_button.setObjectName('exportSaveSettings')
         self.export_save_settings_button.clicked.connect(self._save_plan_settings)
+        self.export_save_settings_button.setMinimumWidth(116)
         self.export_save_settings_button.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         preference_actions.addWidget(self.export_save_settings_button)
         self.export_revert_settings_button = QPushButton('Revert')
         self.export_revert_settings_button.setIcon(export_icon('reset'))
         self.export_revert_settings_button.setMinimumHeight(34)
         self.export_revert_settings_button.setObjectName('exportRevertSettings')
         self.export_revert_settings_button.clicked.connect(self._revert_plan_settings)
+        self.export_revert_settings_button.setMinimumWidth(84)
         self.export_revert_settings_button.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         preference_actions.addWidget(self.export_revert_settings_button)
         preference_buttons.addLayout(preference_actions)
         self.export_preferences_row.hide()
@@ -1135,7 +1168,7 @@ class MainWindow(QMainWindow):
                          0 if compact else 1)
         # Remove only the unsaved-settings caption in narrow view; the actual
         # Save/Revert buttons stay accessible on the same row.
-        self.export_preferences_caption.setVisible(not compact)
+        self.export_preferences_caption.setVisible(True)
         self._export_grid_compact = compact
         grid.invalidate()
         self.export_settings_panel.updateGeometry()
@@ -1209,7 +1242,7 @@ class MainWindow(QMainWindow):
         self.compose_button.setObjectName('primary')
         self.compose_button.setAccessibleName('export3mfButton')
         self.compose_button.setEnabled(False)
-        self.compose_button.setToolTip('Generate and validate a native 3MF, recipe CSV, and report.')
+        self.compose_button.setToolTip('Generate and validate a native 3MF; optional reports are controlled under Advanced.')
         self.compose_button.clicked.connect(self._begin_export)
         self.compose_button.setIcon(export_icon('export'))
         self.compose_button.setIconSize(QSize(18, 18))
@@ -1598,6 +1631,9 @@ class MainWindow(QMainWindow):
             (self.smart_quality, "smart_quality"),
             (self.auto_forecast, "auto_preview"),
             (self.auto_open, "auto_open"),
+            (self.export_recipe_csv, "export_recipe_csv"),
+            (self.export_report_txt, "export_report_txt"),
+            (self.export_validation_md, "export_validation_md"),
         ):
             widget.setChecked(self.plan_preferences.get(field))
         self.quality_bias.setValue(self.plan_preferences.get("quality_bias"))
@@ -1626,6 +1662,9 @@ class MainWindow(QMainWindow):
             (self.smart_quality, "smart_quality"),
             (self.auto_forecast, "auto_preview"),
             (self.auto_open, "auto_open"),
+            (self.export_recipe_csv, "export_recipe_csv"),
+            (self.export_report_txt, "export_report_txt"),
+            (self.export_validation_md, "export_validation_md"),
         ):
             widget.toggled.connect(lambda checked, key=field: self._update_plan_value(key, checked))
         self.quality_bias.valueChanged.connect(self.quality_bias_value.setNum)
@@ -1667,7 +1706,8 @@ class MainWindow(QMainWindow):
             return
         # Export-only configuration does not affect the palette forecast.
         if field in ('native_project_template', 'auto_open', 'output_application',
-                     'bambu_studio_executable', 'orcaslicer_executable'):
+                     'bambu_studio_executable', 'orcaslicer_executable',
+                     'export_recipe_csv', 'export_report_txt', 'export_validation_md'):
             return
         self._invalidate_forecast()
         if changed and field in ('source', 'custom'):
@@ -1705,6 +1745,7 @@ class MainWindow(QMainWindow):
         self.revert_plan_button.setEnabled(dirty)
         self.plan_save_status.setText("Unsaved changes" if dirty else "Settings saved or unchanged")
         if hasattr(self, 'export_save_settings_button'):
+            self.export_pending_details.setText(summarize_pending(self.plan_preferences))
             self.export_save_settings_button.setEnabled(dirty)
             self.export_revert_settings_button.setEnabled(dirty)
             self.export_preferences_row.setVisible(dirty)
@@ -1741,11 +1782,27 @@ class MainWindow(QMainWindow):
         path = self.template_path.text().strip()
         self.template_clear.setEnabled(bool(path))
         self.template_compatibility.setText("")
-        if not path:
-            self.template_status.setObjectName("templateStatusEmpty")
-            self.template_status.setText("No template selected. A blank slicer-saved 3MF is required for generic colored inputs.")
+        requirement = template_requirement(self.state.model_path)
+        if requirement.kind == 'native':
+            # Neither an empty nor a saved template affects a native slicer
+            # source. Keep the saved path usable for the next generic import.
+            self.template_status.setObjectName('templateStatusReady')
+            self.template_status.setText(
+                'Using slicer settings embedded in the selected native 3MF. '
+                'The saved template is ignored for this export.' if path
+                else requirement.description)
+            self.template_path.setToolTip(
+                'Saved template (not used for this native 3MF export).' if path
+                else 'Native 3MF provides its own printer and process settings.')
             self._repolish_template_status()
             return
+        if not path:
+            self.template_status.setObjectName('templateStatusEmpty')
+            self.template_status.setText(requirement.description)
+            self.template_path.setToolTip('Choose a blank slicer project for generic model inputs.')
+            self._repolish_template_status()
+            return
+        self.template_path.setToolTip(path)
         try:
             from native_project_template import inspect_template
             details = inspect_template(path)
@@ -1779,12 +1836,21 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, 'template_attention'):
             return
-        missing = not self.template_path.text().strip()
-        error = self.template_status.objectName() == 'templateStatusError'
-        message = self.template_compatibility.text().strip()
+        requirement = template_requirement(self.state.model_path)
+        selected = bool(self.template_path.text().strip())
+        missing = requirement.required and not selected
+        # A selected template is harmless for native slicer input: the export
+        # request ignores it without changing saved preferences.
+        error = (self.template_status.objectName() == 'templateStatusError'
+                 and requirement.kind != 'native')
+        message = (self.template_compatibility.text().strip()
+                   if requirement.kind != 'native' else '')
         if missing:
             short = 'Select a native 3MF template'
-            detail = self.template_status.text()
+            detail = requirement.description
+        elif requirement.kind == 'unreadable':
+            short = 'Unable to inspect source 3MF'
+            detail = requirement.description
         elif error:
             short = 'Native template unavailable'
             detail = self.template_status.text()
@@ -1808,7 +1874,8 @@ class MainWindow(QMainWindow):
         self.template_attention.setVisible(bool(short))
         self.template_warning_panel.setVisible(bool(short) and self.template_attention.isChecked())
         self.template_attention.setText(
-            ('Compatibility warning' if (message or error) else 'Template required')
+            ('Compatibility warning' if (message or error or requirement.kind == 'unreadable')
+             else 'Template required')
             + ('  ▾' if self.template_attention.isChecked() else '  ▸'))
     def _repolish_template_status(self):
         # Qt caches widget styles: changing objectName requires re-polishing.
@@ -2152,13 +2219,6 @@ class MainWindow(QMainWindow):
         action.setShortcut(QKeySequence.StandardKey.Open)
         action.triggered.connect(self._open_model)
         menu.addAction(action)
-        folder = QAction("Set Default Model Folder…", self)
-        folder.triggered.connect(self._choose_default_model_folder)
-        menu.addAction(folder)
-        reset_folder = QAction("Use Last Opened Model Folder", self)
-        reset_folder.triggered.connect(self._reset_default_model_folder)
-        menu.addAction(reset_folder)
-        menu.addSeparator()
         reference = QAction("Open &Reference…", self)
         reference.setShortcut(QKeySequence("Ctrl+Shift+R"))
         reference.triggered.connect(self._open_reference)
@@ -2167,10 +2227,6 @@ class MainWindow(QMainWindow):
         report.setShortcut(QKeySequence('Ctrl+Shift+O'))
         report.triggered.connect(self._open_existing_report)
         menu.addAction(report)
-        save = QAction("&Save Settings", self)
-        save.setShortcut(QKeySequence.StandardKey.Save)
-        save.triggered.connect(self._save_plan_settings)
-        menu.addAction(save)
         menu.addSeparator()
         close = QAction("E&xit", self)
         close.setShortcut(QKeySequence.StandardKey.Quit)
@@ -2180,13 +2236,13 @@ class MainWindow(QMainWindow):
         clear_color.setShortcut(QKeySequence('Escape'))
         clear_color.triggered.connect(self._handle_view_escape)
         self.addAction(clear_color)
-        view = self.menuBar().addMenu("&View")
+        navigate = self.menuBar().addMenu("&Navigate")
         for idx, name in enumerate(("Plan", "Filaments", "Export")):
             nav = QAction(name, self)
             nav.setShortcut(QKeySequence(f"Ctrl+{idx+1}"))
             nav.triggered.connect(lambda checked=False, index=idx: self.tabs.setCurrentIndex(index))
-            view.addAction(nav)
-        view.addSeparator()
+            navigate.addAction(nav)
+        view = self.menuBar().addMenu("&View")
         fullscreen = QAction('Toggle Expanded Model Preview', self)
         fullscreen.setShortcut(QKeySequence('F11'))
         fullscreen.triggered.connect(self.expand_preview_toggle.toggle)
@@ -2208,6 +2264,33 @@ class MainWindow(QMainWindow):
                 lambda checked=False, chosen=mode: self._set_preview_quality(chosen))
             self.preview_quality_actions[mode] = action
         self.preview_quality_menu.aboutToShow.connect(self._refresh_preview_quality_actions)
+        settings = self.menuBar().addMenu("&Settings")
+        folder = QAction("Set Default Model Folder…", self)
+        folder.triggered.connect(self._choose_default_model_folder)
+        settings.addAction(folder)
+        reset_folder = QAction("Use Last Opened Model Folder", self)
+        reset_folder.triggered.connect(self._reset_default_model_folder)
+        settings.addAction(reset_folder)
+        settings.addSeparator()
+        export_options = QAction("Export Options…", self)
+        export_options.triggered.connect(self._open_export_options)
+        settings.addAction(export_options)
+        settings.addSeparator()
+        save = QAction("&Save Settings", self)
+        save.setShortcut(QKeySequence.StandardKey.Save)
+        save.triggered.connect(self._save_plan_settings)
+        settings.addAction(save)
+        revert = QAction("Revert Unsaved Changes", self)
+        revert.triggered.connect(self._revert_plan_settings)
+        settings.addAction(revert)
+
+    def _open_export_options(self):
+        """Navigate to the existing options; never duplicate settings state."""
+        self.tabs.setCurrentWidget(self.results_panel)
+        self.export_advanced_toggle.setChecked(True)
+        if hasattr(self.results_panel, 'content_scroll'):
+            self.results_panel.content_scroll.ensureWidgetVisible(
+                self.export_advanced_toggle)
 
     def _show_preview_performance(self):
         """On-demand display diagnostics; never changes forecast or export."""
@@ -2695,6 +2778,9 @@ class MainWindow(QMainWindow):
         self._persist_model_location()
         name = display_filename(path)
         self.project_subtitle.setText(name)
+        # The previous source may have had the opposite template requirement.
+        self._refresh_template_status()
+        self._update_export_template_attention()
         self._pending_review_filament_key = None
         self._filament_forecast_held = False  # A new model starts a new session.
         self.filaments_panel.set_model(path)
@@ -2755,7 +2841,10 @@ class MainWindow(QMainWindow):
             self.preview_chrome.set_estimate(None)
         self.preview_mode.setEnabled(False)
         self.reset_camera_button.setEnabled(False)
-        self.preview_status.setText("Reading model geometry…")
+        # Progress widget owns the in-flight message; don't duplicate it.
+        # Restore this label when the load completes (success or error).
+        self.preview_status.setText('')
+        self.preview_scale_notice.hide()
         self._set_preview_quality_busy('Loading model geometry…')
         task = ModelLoadWorker(path, self, quality=self._preview_quality)
         self._preview_threads.append(task)
@@ -2813,6 +2902,11 @@ class MainWindow(QMainWindow):
                   ' · sampled display only' if mesh.sampled else '')
         info = f"{len(mesh.triangles):,} visible triangles / {mesh.source_triangles:,} source triangles{suffix}"
         self.preview_status.setText(info + ' · Left drag orbit · Right drag pan · Wheel zoom · R reset')
+        size_notice = scale_warning(mesh.bounds, path)
+        self.preview_scale_notice.setText(size_notice)
+        self.preview_scale_notice.setVisible(bool(size_notice))
+        if size_notice:
+            self.results_panel.record_event('Model scale', size_notice, 'warning')
         self.bottom_hint.setText('Source geometry loaded. Refresh Forecast for read-only analysis or open Export to generate a native 3MF.')
         self.statusBar().showMessage('3D preview ready: ' + info)
         self.results_panel.record_event('Model preview', info, 'success')
@@ -3726,8 +3820,13 @@ class MainWindow(QMainWindow):
         report = result.get('report')
         if report:
             self.results_panel.load_report(report)
+        else:
+            # A previous export's report must not appear to describe this 3MF.
+            self.results_panel.clear_report()
         self.tabs.setCurrentWidget(self.results_panel)
-        self.statusBar().showMessage('Validated 3MF and reports saved successfully.')
+        extra = sum(bool(result.get(key)) for key in ('csv', 'report', 'colorValidationReport'))
+        self.statusBar().showMessage('Validated 3MF saved' +
+            (f' with {extra} additional file(s).' if extra else ' (no additional files).'))
 
     def _release_export(self, worker):
         should_open = (self._export_request is not None and self._export_request.auto_open

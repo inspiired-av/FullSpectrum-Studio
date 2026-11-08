@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 QT = ROOT/'desktop'/'qt_app'
@@ -85,6 +86,17 @@ class Stage5V3QtTests(unittest.TestCase):
 
     def test_warning_and_advanced_are_independent(self):
         w=self.open_window()
+        # On startup there is no selected input, hence no missing-template
+        # problem. Exercise disclosure independence with a genuine missing
+        # template for a generic 3MF instead of forcing a startup warning.
+        self.assertFalse(w.template_attention.isVisibleTo(w))
+        generic = Path(self.tmp.name) / 'generic_source.3mf'
+        with ZipFile(generic, 'w') as archive:
+            archive.writestr('3D/3dmodel.model', '<model/>')
+        self.assertTrue(w.state.select_model(str(generic)))
+        w._refresh_template_status()
+        w._update_export_template_attention()
+        self.app.processEvents()
         self.assertTrue(w.template_attention.isVisibleTo(w))
         self.assertFalse(w.template_warning_panel.isVisibleTo(w))
         self.assertFalse(w.export_advanced_panel.isVisibleTo(w))

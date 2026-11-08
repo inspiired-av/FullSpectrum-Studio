@@ -61,7 +61,10 @@ class ExportWorkspaceContracts(unittest.TestCase):
         self.assertIn('ExportWorker(request, self)',self.window)
         svc=(UI/'export_service.py').read_text(encoding='utf-8')
         self.assertIn('plan_only=False',svc)
-        self.assertIn('_exclusive_publish(paths, destination)',svc)
+        # Optional CSV/TXT/MD reports are selected at publication only.
+        # The converter must still validate every staged artifact.
+        self.assertIn('selected_keys = publication_keys(request.diagnostic_artifacts)',svc)
+        self.assertIn('_exclusive_publish(paths, destination, selected_keys=selected_keys)',svc)
         self.assertIn("result.get('validation') != 'OK'",svc)
 
     def test_results_present_export_and_keep_logs_optional(self):

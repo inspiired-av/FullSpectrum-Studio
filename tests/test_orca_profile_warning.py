@@ -3,12 +3,10 @@ from orca_profile_warning import orca_h2c_warning
 
 
 class OrcaWarningTests(unittest.TestCase):
-    def test_warns_h2c_orca_selected(self):
+    def test_h2c_orca_2_5_generation_does_not_warn(self):
         msg=orca_h2c_warning({'slicer':'OrcaSlicer','slicerVersion':'2.5.0-dev',
                               'printerPreset':'Bambu Lab H2C 0.2 nozzle'},'OrcaSlicer')
-        self.assertIn('2.5.0',msg)
-        self.assertIn('H2C',msg)
-        self.assertIn('nightly',msg)
+        self.assertEqual('', msg)
 
     def test_warns_cross_slicer_template(self):
         msg=orca_h2c_warning({'slicer':'OrcaSlicer','slicerVersion':'2.5.0-dev',

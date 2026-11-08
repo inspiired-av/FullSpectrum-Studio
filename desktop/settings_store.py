@@ -20,7 +20,8 @@ CHOICES = {
     "mix_model": {"bambu"},
     "output_application": {"Bambu Studio", "OrcaSlicer"},
 }
-BOOL_FIELDS = ("smart_quality", "auto_preview", "auto_open", "direct_source_colors")
+BOOL_FIELDS = ("smart_quality", "auto_preview", "auto_open", "direct_source_colors",
+               "export_recipe_csv", "export_report_txt", "export_validation_md")
 ANCHOR_FIELDS = ("disabled_anchor_keys", "pinned_anchor_keys")
 
 

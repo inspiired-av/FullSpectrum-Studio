@@ -5,7 +5,7 @@ Forecast remains the read-only plan_only=True workflow in forecast_service.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile, BadZipFile
@@ -14,6 +14,8 @@ import shutil
 import math
 
 from desktop.qt_app.forecast_service import ForecastRequest, _available_keys
+from desktop.qt_app.export_artifacts import chosen_diagnostics, publication_keys, OPTIONAL_ARTIFACTS
+from desktop.qt_app.export_template_policy import template_requirement
 
 ARTIFACT_KEYS = ('csv', 'report', 'colorValidationReport', 'output')  # publish 3MF last
 VALID_SLICERS = ('Bambu Studio', 'OrcaSlicer')
@@ -26,12 +28,20 @@ class ExportRequest:
     slicer: str
     slicer_executable: str = ''
     auto_open: bool = False
+    diagnostic_artifacts: tuple[str, ...] = OPTIONAL_ARTIFACTS
 
 
 def make_export_request(model, reference, preferences, filament_preferences, destination):
     """Snapshot unsaved UI edits and slicer choices; no settings are persisted."""
     from desktop.qt_app.forecast_service import make_request
     plan = make_request(model, reference, preferences, filament_preferences)
+    # A native Bambu/Orca project carries its OWN slicer settings. Keep the
+    # user's saved blank template for their next generic 3MF/OBJ/GLB, but
+    # remove it from this immutable export-request snapshot only. The engine's
+    # native-template guard remains intact for direct/invalid API requests.
+    if template_requirement(plan.model).kind == 'native':
+        plan = replace(plan, settings={**plan.settings,
+                                       'native_project_template': ''})
     slicer = preferences.get('output_application')
     if slicer not in VALID_SLICERS:
         raise ValueError('Choose Bambu Studio or OrcaSlicer as your output slicer.')
@@ -39,7 +49,8 @@ def make_export_request(model, reference, preferences, filament_preferences, des
            else 'orcaslicer_executable')
     return ExportRequest(plan, str(destination), slicer,
                          str(preferences.get(key) or ''),
-                         bool(preferences.get('auto_open')))
+                         bool(preferences.get('auto_open')),
+                         chosen_diagnostics(preferences))
 
 
 def _validate_options(plan, engine, loader):
@@ -73,7 +84,7 @@ def _validate_options(plan, engine, loader):
     return standard, sorted(plan.pinned & enabled), (sorted(enabled) if plan.disabled else None), protected
 
 
-def _exclusive_publish(files, destination):
+def _exclusive_publish(files, destination, *, selected_keys=None):
     """Never replace a user file, even if the destination changes during export.
 
     Reserve all final filenames exclusively. Roll back files created by this
@@ -81,7 +92,11 @@ def _exclusive_publish(files, destination):
     cancellation request, because the validated result is already on disk.
     """
     target = Path(destination).resolve()
-    paths = {key: target / Path(file).name for key, file in files.items()}
+    keys = tuple(selected_keys) if selected_keys is not None else ARTIFACT_KEYS
+    if ('output' not in keys or len(keys) != len(set(keys)) or
+            any(key not in ARTIFACT_KEYS for key in keys)):
+        raise ValueError('Invalid export publication selection')
+    paths = {key: target / Path(files[key]).name for key in keys}
     if len({str(p).casefold() for p in paths.values()}) != len(paths):
         raise ValueError('Converter returned colliding export filenames.')
     existing = [p.name for p in paths.values() if p.exists()]
@@ -90,7 +105,7 @@ def _exclusive_publish(files, destination):
                               '. Move them or choose a different output folder; nothing was overwritten.')
     created = []
     try:
-        for key in ARTIFACT_KEYS:
+        for key in keys:
             source = Path(files[key])
             dest = paths[key]
             try:
@@ -102,7 +117,7 @@ def _exclusive_publish(files, destination):
                     shutil.copyfileobj(reader, writer, 1024 * 1024)
                 continue
             created.append(dest)
-        return {key: str(paths[key]) for key in ARTIFACT_KEYS}
+        return {key: str(paths[key]) for key in keys}
     except BaseException:
         for path in reversed(created):
             try: path.unlink(missing_ok=True)
@@ -198,6 +213,9 @@ def run_export(request: ExportRequest, *, engine=None, options_loader=None, prog
         raise ValueError('Choose an existing output folder.')
     if not os.access(destination, os.W_OK):
         raise PermissionError('Output folder is not writable.')
+    # Validate the publication policy before invoking the expensive converter.
+    # ALL four files are still generated and verified inside private staging.
+    selected_keys = publication_keys(request.diagnostic_artifacts)
     s = plan.settings
     standard, pinned, enabled, protected = _validate_options(plan, engine, options_loader)
     bias = 'auto' if s['smart_quality'] else s['quality_bias']
@@ -229,7 +247,9 @@ def run_export(request: ExportRequest, *, engine=None, options_loader=None, prog
         # The converter validates its own staging filename before we rename it.
         paths = _renamed_staged_assets(paths, request)
         progress(.99, 'Publishing validated files without replacing existing outputs')
-        published = _exclusive_publish(paths, destination)
-        return {**result, **published, 'slicer': request.slicer,
+        published = _exclusive_publish(paths, destination, selected_keys=selected_keys)
+        # Never return paths to suppressed files in an auto-deleted staging dir.
+        hidden = {key: None for key in OPTIONAL_ARTIFACTS if key not in published}
+        return {**result, **hidden, **published, 'slicer': request.slicer,
                 'autoOpen': request.auto_open,
                 'slicerExecutable': request.slicer_executable}
