@@ -54,6 +54,16 @@ from desktop.qt_app.export_worker import ExportWorker
 from desktop.qt_app.export_service import make_export_request
 from desktop.qt_app.export_pending_settings import summarize_pending
 from desktop.qt_app.preview_scale_check import scale_warning
+from desktop.qt_app.model_intended_dimensions import scaled_dimensions, source_dimensions
+from desktop.qt_app.model_dimensions_dialog import IntendedDimensionsDialog
+from desktop.qt_app.model_scale_worker import ModelScaleWorker
+from desktop.qt_app.model_size_preflight_worker import ModelSizePreflightWorker
+from desktop.qt_app.model_auto_dimensions_dialog import AutoIntendedDimensionsDialog
+from desktop.qt_app.model_size_preflight import (
+    suspicious_obj_bounds, read_dimension_choice, save_dimension_choice,
+    forget_dimension_choice,
+)
+from tempfile import TemporaryDirectory
 from desktop.qt_app.export_template_policy import template_requirement
 from desktop.slicer_launcher import find_windows_slicer
 from desktop.qt_app.forecast_service import make_request
@@ -115,6 +125,19 @@ class MainWindow(QMainWindow):
         self.state = ShellState()
         self._preview_serial = 0
         self._preview_threads = []
+        # FULLSPECTRUM_INTENDED_DIMENSIONS_143: an immutable source and a temporary derived OBJ.
+        self._unscaled_bounds = None
+        self._intended_scale = 1.0
+        self._scaled_model_path = None
+        self._scale_workspaces = []
+        self._scale_task = None
+        self._scale_source = None
+        self._scale_target_factor = None
+        self._size_probe_serial = 0
+        self._size_probe_threads = []
+        self._size_probe_active = False
+        self._scale_remember = False
+        self._auto_scale_loading = False
         self._original_mesh = None
         self._predicted_mesh = None
         self._predicted_serial = 0
@@ -184,6 +207,8 @@ class MainWindow(QMainWindow):
         self._grid_settings_path = preview_grid_settings_path(self._plate_settings_path)
         self._grid_settings = read_grid_settings(self._grid_settings_path)
         self._model_location_path = model_location_path(self._plate_settings_path)
+        self._dimension_choices_path = Path(self._model_location_path).with_name(
+            'model_dimension_choices.json')
         self._model_location = read_model_location(self._model_location_path)
         self._preview_quality_path = self._plate_settings_path.with_name(SETTINGS_FILENAME)
         self._preview_quality = read_quality(self._preview_quality_path)
@@ -495,7 +520,28 @@ class MainWindow(QMainWindow):
         self.preview_scale_notice.setObjectName('previewScaleNotice')
         self.preview_scale_notice.setStyleSheet('color: #edbf73;')
         self.preview_scale_notice.hide()
-        model_layout.addWidget(self.preview_scale_notice)
+        # Physical-size status stays next to its corrective action. The button
+        # changes actual OBJ geometry, never the camera or just the grid.
+        self.preview_scale_row = QHBoxLayout()
+        self.preview_scale_row.setContentsMargins(0, 1, 0, 1)
+        self.preview_scale_row.setSpacing(8)
+        self.preview_scale_row.addWidget(self.preview_scale_notice, 1)
+        self.preview_adjust_dimensions = QPushButton('Adjust Dimensions…')
+        self.preview_adjust_dimensions.setObjectName('previewAdjustDimensions')
+        self.preview_adjust_dimensions.setToolTip(
+            'Set or restore the physical OBJ size (File → Set Intended Dimensions…).')
+        self.preview_adjust_dimensions.setStyleSheet(
+            'QPushButton#previewAdjustDimensions {'
+            'color: #8bd4e5; border: 1px solid #3c6e80;'
+            'background: #1a2d39; border-radius: 5px; padding: 5px 10px;}'
+            'QPushButton#previewAdjustDimensions:hover {'
+            'background: #244452; border-color: #5eabbe;}'
+            'QPushButton#previewAdjustDimensions:disabled {'
+            'color: #77858f; border-color: #36414b; background: #1b252d;}')
+        self.preview_adjust_dimensions.clicked.connect(self._set_intended_dimensions)
+        self.preview_adjust_dimensions.hide()
+        self.preview_scale_row.addWidget(self.preview_adjust_dimensions, 0)
+        model_layout.addLayout(self.preview_scale_row)
         # A compact in-viewport key is easier to read than an inline footnote.
         # It is a Qt child overlay; no texture, geometry or OpenGL change.
         self.preview_legend = ColorLossLegend(self.preview_surface)
@@ -1994,7 +2040,9 @@ class MainWindow(QMainWindow):
         if ready and hasattr(self, 'filament_setup_banner'):
             ready = self._filament_decision().ready and getattr(
                 self.filaments_panel, 'selection_is_valid', True)
-        self.compose_button.setEnabled(ready and not busy and self._forecast_task is None)
+        self.compose_button.setEnabled(ready and not busy and self._forecast_task is None
+                                       and self._scale_task is None
+                                       and not self._size_probe_active)
         self.export_cancel_button.setEnabled(busy and self._export_task.isRunning())
         self.export_cancel_button.setVisible(busy)
         self.export_action_stack.setCurrentIndex(1 if busy else 0)
@@ -2227,6 +2275,12 @@ class MainWindow(QMainWindow):
         report.setShortcut(QKeySequence('Ctrl+Shift+O'))
         report.triggered.connect(self._open_existing_report)
         menu.addAction(report)
+        # The source remains unchanged; the derived OBJ is used by all pipelines.
+        self.intended_dimensions_action = QAction("Set Intended Dimensions…", self)
+        self.intended_dimensions_action.setObjectName("setIntendedDimensionsAction")
+        self.intended_dimensions_action.setEnabled(False)
+        self.intended_dimensions_action.triggered.connect(self._set_intended_dimensions)
+        menu.addAction(self.intended_dimensions_action)
         menu.addSeparator()
         close = QAction("E&xit", self)
         close.setShortcut(QKeySequence.StandardKey.Quit)
@@ -2342,7 +2396,8 @@ class MainWindow(QMainWindow):
             self._set_preview_quality_busy('')
             return
         task = ModelLoadWorker(
-            path, self, quality=mode, source_mesh=self._preview_quality_source_mesh)
+            self._active_geometry_path(), self, quality=mode,
+            source_mesh=self._preview_quality_source_mesh)
         task._preview_source_serial = serial
         self._preview_quality_task = task
         self._preview_threads.append(task)
@@ -2730,13 +2785,187 @@ class MainWindow(QMainWindow):
             self._export_task.requestInterruption()
         if self._forecast_task is not None:
             self._forecast_task.requestInterruption()
+        if self._scale_task is not None:
+            self._scale_task.requestInterruption()
+        for worker in list(self._size_probe_threads):
+            worker.requestInterruption()
         plate_workers = list(self._plate_load_threads)
         if self._plate_catalog_task is not None:
             plate_workers.append(self._plate_catalog_task)
-        for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + plate_workers + ([self._forecast_task] if self._forecast_task is not None else []) + ([self._export_task] if self._export_task is not None else []):
+        for worker in list(self.filaments_panel._workers) + list(self._preview_threads) + list(self._inspection_threads) + list(self._size_probe_threads) + plate_workers + ([self._forecast_task] if self._forecast_task is not None else []) + ([self._export_task] if self._export_task is not None else []) + ([self._scale_task] if self._scale_task is not None else []):
             if worker.isRunning():
                 worker.wait()
+        for workspace in self._scale_workspaces:
+            workspace.cleanup()
+        self._scale_workspaces.clear()
         super().closeEvent(event)
+
+    def _active_geometry_path(self):
+        """One immutable model source for preview, planning, and export."""
+        return self._scaled_model_path or self.state.model_path
+
+    def _remember_auto_dimension_choice(self, action, factor=None):
+        try:
+            save_dimension_choice(self._dimension_choices_path,
+                                  self.state.model_path, action, factor)
+        except (OSError, ValueError, TypeError) as exc:
+            self.statusBar().showMessage('Unable to save model dimension preference: ' + str(exc))
+
+    def _forget_auto_dimension_choice(self):
+        try:
+            forget_dimension_choice(self._dimension_choices_path, self.state.model_path)
+        except OSError as exc:
+            self.statusBar().showMessage('Unable to update dimension preference: ' + str(exc))
+
+    def _start_model_size_preflight(self, path):
+        """Only scan bounds first; no expanded mesh/GL preparations yet."""
+        self._size_probe_serial += 1
+        serial = self._size_probe_serial
+        self._size_probe_active = True
+        self._preview_serial += 1  # A late earlier-model mesh may not replace this one.
+        self._original_mesh = None
+        self.preview_surface.clear_mesh()
+        self.preview_scale_notice.hide()
+        self.preview_adjust_dimensions.hide()
+        self.preview_status.setText('')
+        self.source_palette_content.setVisible(False)
+        self._set_preview_quality_busy('Checking model dimensions…')
+        task = ModelSizePreflightWorker(path, self)
+        self._size_probe_threads.append(task)
+        task.completed.connect(
+            lambda bounds, error, s=serial, p=str(path):
+                self._model_size_preflight_done(s, p, bounds, error))
+        task.finished.connect(lambda t=task: self._release_size_preflight(t))
+        task.start()
+
+    def _release_size_preflight(self, worker):
+        if worker in self._size_probe_threads:
+            self._size_probe_threads.remove(worker)
+        worker.deleteLater()
+
+    def _model_size_preflight_done(self, serial, path, bounds, error):
+        if (serial != self._size_probe_serial or path != self.state.model_path or
+                self._qt_disposing):
+            return
+        self._size_probe_active = False
+        self._set_preview_quality_busy('')
+        self._unscaled_bounds = bounds
+        if error:
+            # The existing model loader is responsible for reporting invalid
+            # source geometry in detail. Do not silently reject or repair it.
+            self.results_panel.record_event('Dimensions check', error, 'warning')
+        elif suspicious_obj_bounds(bounds):
+            choice = read_dimension_choice(self._dimension_choices_path, path)
+            if choice is not None:
+                if choice['action'] == 'apply':
+                    self._begin_obj_scaling(choice['factor'], automatic=True)
+                    return
+            else:
+                dialog = AutoIntendedDimensionsDialog(bounds, self)
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                if self._qt_disposing or self.state.model_path != path:
+                    return
+                if accepted:
+                    self._begin_obj_scaling(dialog.scale_factor,
+                                            remember=dialog.remember_choice,
+                                            automatic=True)
+                    return
+                if dialog.remember_choice:
+                    self._remember_auto_dimension_choice('skip')
+        # Skipped, unchanged, unsupported, or formerly remembered Skip.
+        self._load_preview(path)
+        self._refresh_export_availability()
+
+    def _set_intended_dimensions(self, _checked=False):
+        """Ask for exact physical size; rescale source OBJ off the GUI thread."""
+        if (self._scale_task is not None or self._export_task is not None or
+                self._forecast_task is not None or self._unscaled_bounds is None or
+                Path(self.state.model_path).suffix.lower() != '.obj'):
+            return
+        dialog = IntendedDimensionsDialog(self._unscaled_bounds, self._intended_scale, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        # Manual changes supersede any previously remembered auto import rule.
+        self._forget_auto_dimension_choice()
+        if dialog.reset_requested or abs(dialog.scale_factor - 1.0) <= 1e-10:
+            self._scaled_model_path = None
+            self._intended_scale = 1.0
+            self._load_preview(self.state.model_path)
+            self._invalidate_forecast(clear_inspection=True)
+            self.statusBar().showMessage('Restored original OBJ coordinates; forecast requires refresh.')
+            return
+        self._begin_obj_scaling(dialog.scale_factor)
+
+    def _begin_obj_scaling(self, factor, *, remember=False, automatic=False):
+        """One derived geometry source shared by preview, forecast and export."""
+        self._scale_remember = bool(remember)
+        self._auto_scale_loading = bool(automatic)
+        if abs(factor - 1.0) <= 1e-10:
+            self._scaled_model_path = None
+            self._intended_scale = 1.0
+            if remember:
+                self._remember_auto_dimension_choice('apply', factor)
+            self._auto_scale_loading = False
+            self._load_preview(self.state.model_path)
+            self._invalidate_forecast(clear_inspection=True)
+            return
+        workspace = TemporaryDirectory(prefix='fullspectrum_scaled_obj_')
+        self._scale_workspaces.append(workspace)
+        target = Path(workspace.name) / Path(self.state.model_path).name
+        worker = ModelScaleWorker(self.state.model_path, target, factor, self)
+        self._scale_task = worker
+        self._scale_source = self.state.model_path
+        self._scale_target_factor = factor
+        self.intended_dimensions_action.setEnabled(False)
+        self._forecast_timer.stop()
+        self._set_preview_quality_busy('Applying intended dimensions…')
+        self._refresh_export_availability()
+        worker.completed.connect(
+            lambda output, error, t=worker: self._scaled_obj_ready(t, output, error))
+        worker.finished.connect(lambda t=worker: self._release_scale_task(t))
+        worker.start()
+
+    def _scaled_obj_ready(self, worker, output, error):
+        if worker is not self._scale_task or self.state.model_path != self._scale_source:
+            return
+        self._set_preview_quality_busy('')
+        if error or not output or not Path(output).is_file():
+            automatic = self._auto_scale_loading
+            self._auto_scale_loading = False
+            self._scale_remember = False
+            QMessageBox.warning(self, 'Unable to Set Intended Dimensions',
+                                str(error or 'Scaled OBJ was not produced'))
+            self.statusBar().showMessage('Original model and dimensions retained.')
+            if automatic:
+                # A failed optional calibration must not strand the import.
+                self._load_preview(self.state.model_path)
+            return
+        self._scaled_model_path = str(output)
+        self._intended_scale = self._scale_target_factor
+        if self._scale_remember:
+            self._remember_auto_dimension_choice('apply', self._intended_scale)
+        self._scale_remember = False
+        self._auto_scale_loading = False
+        # Changing geometry always invalidates forecasts, but never changes
+        # the source path used to track unsaved filament assignments.
+        self._load_preview(self.state.model_path)
+        self._invalidate_forecast(clear_inspection=True)
+        self.statusBar().showMessage('Intended OBJ dimensions applied to preview, forecast and export.')
+
+    def _release_scale_task(self, worker):
+        if self._scale_task is worker:
+            self._scale_task = None
+            self._scale_source = None
+            self._scale_target_factor = None
+        worker.deleteLater()
+        self.intended_dimensions_action.setEnabled(
+            self._unscaled_bounds is not None and
+            Path(self.state.model_path).suffix.lower() == '.obj')
+        # Scaling tasks sometimes complete after a preview callback. Keep the
+        # in-preview adjustment action synchronized with the File action.
+        self.preview_adjust_dimensions.setEnabled(
+            self.intended_dimensions_action.isEnabled())
+        self._refresh_export_availability()
 
     def _persist_model_location(self):
         try:
@@ -2763,6 +2992,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage('Model picker will use the last opened folder.')
 
     def _open_model(self, path=None):
+        if self._scale_task is not None:
+            QMessageBox.information(self, "Model dimensions", "Finish preparing intended dimensions before opening another model.")
+            return
         if self._export_task is not None:
             QMessageBox.information(self, 'Export in progress', 'Wait for export to finish before changing models.')
             return
@@ -2773,6 +3005,14 @@ class MainWindow(QMainWindow):
                 MODEL_FILE_FILTER)
         if not self.state.select_model(path):
             return
+        for running_probe in self._size_probe_threads:
+            running_probe.requestInterruption()
+        self._size_probe_serial += 1
+        self._size_probe_active = False
+        self._scaled_model_path = None
+        self._intended_scale = 1.0
+        self._unscaled_bounds = None
+        self.intended_dimensions_action.setEnabled(False)
         # Handles both Open Model and drag-and-drop, but not cancelled picks.
         self._model_location = with_last_opened_model(self._model_location, path)
         self._persist_model_location()
@@ -2790,9 +3030,12 @@ class MainWindow(QMainWindow):
         self.results_panel.record_event('Model selected', f'{name} selected; loading preview geometry.', 'busy')
         self._refresh_export_directory()
         self._refresh_results_context()
-        self._refresh_export_availability()
-        self._load_preview(path)
+        if Path(path).suffix.lower() == '.obj':
+            self._start_model_size_preflight(path)
+        else:
+            self._load_preview(path)
         self._invalidate_forecast(clear_inspection=True)
+        self._refresh_export_availability()
 
     def _open_reference(self):
         if self._export_task is not None:
@@ -2809,6 +3052,9 @@ class MainWindow(QMainWindow):
         self._invalidate_forecast()
 
     def _load_preview(self, path):
+        # The original user-visible path remains the model identity.
+        # Only the worker opens the temporary, uniformly scaled copy.
+        geometry_path = self._active_geometry_path()
         self._preview_quality_generation += 1
         self._preview_quality_pending = False
         if self._preview_quality_task is not None:
@@ -2845,12 +3091,13 @@ class MainWindow(QMainWindow):
         # Restore this label when the load completes (success or error).
         self.preview_status.setText('')
         self.preview_scale_notice.hide()
+        self.preview_adjust_dimensions.hide()
         self._set_preview_quality_busy('Loading model geometry…')
-        task = ModelLoadWorker(path, self, quality=self._preview_quality)
+        task = ModelLoadWorker(geometry_path, self, quality=self._preview_quality)
         self._preview_threads.append(task)
         task.completed.connect(
-            lambda mesh, error, filename, s=serial, t=task:
-                self._preview_loaded(s, filename, mesh, error, t.source_mesh))
+            lambda mesh, error, filename, s=serial, t=task, original=path:
+                self._preview_loaded(s, original, mesh, error, t.source_mesh))
         task.finished.connect(lambda t=task: self._release_preview_task(t))
         task.start()
 
@@ -2869,6 +3116,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Model preview unavailable.")
             self.results_panel.record_event('Model preview', error, 'warning')
             return
+        if self._scaled_model_path is None:
+            self._unscaled_bounds = mesh.bounds
+        self.intended_dimensions_action.setEnabled(
+            Path(path).suffix.lower() == ".obj" and self._scale_task is None)
         self._preview_quality_source_mesh = source_mesh or mesh
         profile = getattr(mesh, 'load_profile', None)
         mode = profile.quality_mode if profile else self._preview_quality
@@ -2903,10 +3154,41 @@ class MainWindow(QMainWindow):
         info = f"{len(mesh.triangles):,} visible triangles / {mesh.source_triangles:,} source triangles{suffix}"
         self.preview_status.setText(info + ' · Left drag orbit · Right drag pan · Wheel zoom · R reset')
         size_notice = scale_warning(mesh.bounds, path)
+        if self._scaled_model_path is not None and self._unscaled_bounds is not None:
+            sizes = scaled_dimensions(self._unscaled_bounds, self._intended_scale)
+            size_notice = ("Intended dimensions: " + " × ".join(f"{v:.4g}" for v in sizes)
+                           + f" mm (uniform scale ×{self._intended_scale:.5g}). "
+                           "Temporary source for preview, forecast and export; original OBJ unchanged.")
+        self.preview_scale_notice.setStyleSheet('color: #77d3b3;' if self._scaled_model_path is not None
+                                               else 'color: #edbf73;')
         self.preview_scale_notice.setText(size_notice)
+        if self._scaled_model_path is not None:
+            self.results_panel.record_event('Model dimensions', size_notice, 'info')
         self.preview_scale_notice.setVisible(bool(size_notice))
         if size_notice:
             self.results_panel.record_event('Model scale', size_notice, 'warning')
+        # Dimension UI polish: show an editable physical-size summary.
+        if Path(path).suffix.lower() == '.obj' and self._unscaled_bounds is not None:
+            if self._scaled_model_path is not None:
+                physical_sizes = scaled_dimensions(self._unscaled_bounds, self._intended_scale)
+                self.preview_scale_notice.setText(
+                    'Intended size: ' + ' × '.join(f'{v:.4g}' for v in physical_sizes)
+                    + f' mm · Uniform scale ×{self._intended_scale:.5g}. Original OBJ unchanged.')
+                self.preview_scale_notice.setStyleSheet('color: #83dfd4;')
+            else:
+                original_sizes = source_dimensions(self._unscaled_bounds)
+                questionable_scale = bool(scale_warning(self._unscaled_bounds, path))
+                self.preview_scale_notice.setText(
+                    ('Scale not verified: ' if questionable_scale else 'OBJ coordinate size: ')
+                    + ' × '.join(f'{v:.5g}' for v in original_sizes)
+                    + ' source units · Physical size in mm not specified.')
+                self.preview_scale_notice.setStyleSheet(
+                    'color: #eac17b;' if questionable_scale else 'color: #a7becb;')
+            self.preview_scale_notice.show()
+            self.preview_adjust_dimensions.setEnabled(self._scale_task is None)
+            self.preview_adjust_dimensions.show()
+        else:
+            self.preview_adjust_dimensions.hide()
         self.bottom_hint.setText('Source geometry loaded. Refresh Forecast for read-only analysis or open Export to generate a native 3MF.')
         self.statusBar().showMessage('3D preview ready: ' + info)
         self.results_panel.record_event('Model preview', info, 'success')
@@ -3092,7 +3374,13 @@ class MainWindow(QMainWindow):
             self._forecast_timer.stop()
             self._refresh_filament_setup_ui()
             return
-        path = self.state.model_path
+        if self._size_probe_active:
+            self._set_forecast_status('Checking model dimensions before forecasting…', 'busy')
+            return
+        if self._scale_task is not None:
+            self._set_forecast_status("Applying intended dimensions before forecasting…", "busy")
+            return
+        path = self._active_geometry_path()
         if not path or not Path(path).is_file():
             self._set_forecast_status('Choose a model before running a forecast.')
             return
@@ -3732,6 +4020,13 @@ class MainWindow(QMainWindow):
 
     # Stage 4D-C: leave Stage 4D-A preview/forecast code untouched.
     def _begin_export(self):
+        if self._size_probe_active:
+            QMessageBox.information(self, 'Model dimensions',
+                                    'Finish checking dimensions before exporting.')
+            return
+        if self._scale_task is not None:
+            QMessageBox.information(self, "Model dimensions", "Finish preparing intended dimensions before exporting.")
+            return
         if self._export_task is not None or self._forecast_task is not None:
             QMessageBox.information(self, 'Export busy', 'Wait for the current background task to finish.')
             return
@@ -3749,7 +4044,7 @@ class MainWindow(QMainWindow):
                 'Choose an existing output folder on the Export tab before exporting.')
             return
         request = make_export_request(
-            self.state.model_path, self.state.reference_path,
+            self._active_geometry_path(), self.state.reference_path,
             self.plan_preferences, self.filaments_panel.preferences, directory)
         self._forecast_timer.stop()  # no concurrent palette planning
         self.forecast_refresh.setEnabled(False)

@@ -47,6 +47,11 @@ def scale_warning(bounds, filename):
     else:
         unit = ('GLB/glTF coordinates are conventionally in meters; this '
                 'Qt preview does not currently convert them to millimeters.')
+    instruction = (
+        ' To set intended OBJ dimensions: open File → Set Intended Dimensions…, '
+        'choose X, Y, or Z, enter the intended size in millimeters, '
+        'then select Apply Dimensions. The original OBJ stays unchanged.'
+        if extension == '.obj' else '')
     return (f'{flag}: {shown} source units (X × Y × Z). {unit} '
             'Verify physical dimensions in the slicer before printing; '
-            'FullSpectrum has not changed the model scale.')
+            'FullSpectrum has not changed the model scale.' + instruction)
