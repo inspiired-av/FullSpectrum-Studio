@@ -2561,16 +2561,23 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
         count for count in automatic_slot_counts_for_mode(mode)
         if count >= len(pinned_anchors)
     ]
+    if requested is None:
+        # Auto means feasible within the selected physical filament source.
+        # A five-color custom kit cannot satisfy a six-color candidate, no
+        # matter how many colors appear in the model being optimized.
+        available_distinct = len({anchor_color(item) for item in pool})
+        counts = [count for count in counts if count <= available_distinct]
     if requested is None and mode!="cmykw":
         active_target_colors=len({hx(color) for _,color,weight in used if weight>0})
-        auto_ceiling=max(minimum,min(maximum,active_target_colors),len(pinned_anchors))
+        auto_ceiling=min(available_distinct,
+                         max(minimum,min(maximum,active_target_colors),len(pinned_anchors)))
         counts=[count for count in counts if count<=auto_ceiling]
         if active_target_colors<=DEFAULT_AUTO_MAX_REAL_SLOTS:
             counts=[count for count in counts if count==auto_ceiling]
         elif active_target_colors>=18:
-            counts=[count for count in counts if count>=5]
+            counts=[count for count in counts if count>=min(5, available_distinct)]
         elif active_target_colors>=10:
-            counts=[count for count in counts if count>=4]
+            counts=[count for count in counts if count>=min(4, available_distinct)]
     if not counts:
         raise RuntimeError(f"{len(pinned_anchors)} manual anchors were selected, but the automatic slot range cannot fit them.")
     trials=[]

@@ -109,6 +109,7 @@ class FilamentsTab(QWidget):
     protections_changed = Signal(object)
     planning_changed = Signal(bool)  # Valid live (unsaved) filament choices changed.
     explicit_refresh_requested = Signal()  # User clicked Load / Refresh, not automatic startup.
+    library_palette_ready = Signal(str)  # User-selected app-owned active palette.
     def __init__(self, plan_preferences, settings_path=None, parent=None):
         super().__init__(parent)
         self.plan_preferences = plan_preferences
@@ -162,7 +163,28 @@ class FilamentsTab(QWidget):
         self.filament_source.setObjectName('filamentSource')
         for label, value in FILAMENT_SOURCES:
             self.filament_source.addItem(label, value)
-        lay.addWidget(self.filament_source)
+        # Compact source/profile controls; profiles apply only to Custom.
+        source_row = QHBoxLayout()
+        source_row.setSpacing(7)
+        self.filament_source.setMinimumWidth(125)
+        source_row.addWidget(self.filament_source, 1)
+        self.quick_profile_label = QLabel('Profile:')
+        self.quick_profile_label.setObjectName('quickProfileLabel')
+        source_row.addWidget(self.quick_profile_label)
+        self.quick_profile_combo = WheelSafeComboBox()
+        self.quick_profile_combo.setObjectName('quickPaletteProfile')
+        self.quick_profile_combo.setToolTip('Select Custom filament library to load a saved palette profile')
+        self.quick_profile_combo.setMinimumWidth(125)
+        self.quick_profile_combo.currentIndexChanged.connect(self._choose_quick_profile)
+        source_row.addWidget(self.quick_profile_combo, 1)
+        self.library_button = QPushButton('Library…')
+        self.library_button.setObjectName('manageFilamentLibrary')
+        self.library_button.clicked.connect(self._open_filament_library)
+        source_row.addWidget(self.library_button)
+        lay.addLayout(source_row)
+        self._refresh_quick_profiles()
+        self.filament_source.currentIndexChanged.connect(self._refresh_quick_profile_enabled)
+        self._refresh_quick_profile_enabled()
         self.custom_file_row = QWidget()
         library_row = QHBoxLayout(self.custom_file_row)
         library_row.setContentsMargins(0, 0, 0, 0)
@@ -208,7 +230,20 @@ class FilamentsTab(QWidget):
         # The page scrolls in short windows. In tall windows, tables receive
         # spare vertical space instead of leaving a dead region below them.
         self.filaments.setMinimumHeight(230)
+        self.filaments.setMinimumWidth(215)
         self.filaments.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Match the catalog's readable, non-striped dark table, without
+        # altering native checkbox focus/Windows accent colors.
+        self.filaments.setAlternatingRowColors(False)
+        self.filaments.setShowGrid(False)
+        self.filaments.setStyleSheet(
+            'QTableWidget#filamentTable {'
+            'background: #171d24; color: #d8e5ed; border: 1px solid #344550;'
+            'selection-background-color: #2b5361; selection-color: #ffffff;}'
+            'QTableWidget#filamentTable::item {'
+            'border-bottom: 1px solid #2b3640; padding: 2px 4px;}'
+            'QTableWidget#filamentTable::item:selected {'
+            'background: #2b5361; color: #ffffff;}')
         lay.addWidget(self.filaments, 3)
         # Ctrl+A selects visible rows; clicking the sole selected row clears it.
         bulk_actions = QHBoxLayout()
@@ -281,6 +316,59 @@ class FilamentsTab(QWidget):
         self._update_actions()
         self.filaments.itemSelectionChanged.connect(self._update_actions)
         self.filaments.select_visible_requested.connect(self._select_filtered_filaments)
+
+    def _refresh_quick_profiles(self):
+        from desktop.qt_app.filament_library_store import profile_choices
+        previous = self.quick_profile_combo.currentData()
+        self.quick_profile_combo.blockSignals(True)
+        self.quick_profile_combo.clear()
+        self.quick_profile_combo.addItem('Quick profiles…', None)
+        try:
+            for profile in profile_choices():
+                self.quick_profile_combo.addItem(profile['name'], profile['id'])
+        except (OSError, ValueError) as exc:
+            self.activity_event.emit('warning', 'Quick profiles', str(exc))
+        index = self.quick_profile_combo.findData(previous)
+        self.quick_profile_combo.setCurrentIndex(max(index, 0))
+        self.quick_profile_combo.blockSignals(False)
+
+    def _refresh_quick_profile_enabled(self, *_unused):
+        enabled = self.filament_source.currentData() == 'custom'
+        self.quick_profile_label.setEnabled(enabled)
+        self.quick_profile_combo.setEnabled(enabled)
+
+    def _choose_quick_profile(self, *_unused):
+        if self.filament_source.currentData() != 'custom':
+            return
+        identity = self.quick_profile_combo.currentData()
+        if not identity:
+            return
+        from desktop.qt_app.filament_library_store import get_profile, activate_palette
+        try:
+            path = activate_palette(get_profile(identity)['filaments'])
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Cannot Load Quick Profile', str(exc))
+            return
+        self.library_palette_ready.emit(str(path))
+
+    def _open_filament_library(self):
+        from desktop.qt_app.filament_library_dialog import FilamentLibraryDialog
+        try:
+            dialog = FilamentLibraryDialog(parent=self)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Cannot Open Filament Library', str(exc))
+            return
+        selected_profile = self.quick_profile_combo.currentData()
+        result = dialog.exec()
+        self._refresh_quick_profiles()  # Save Profile is independent of Apply.
+        # If the active saved profile changed, regenerate the active palette
+        # and invalidate its forecast instead of leaving a stale snapshot.
+        if (selected_profile in getattr(dialog, 'changed_profile_ids', set()) and
+                self.quick_profile_combo.findData(selected_profile) >= 0 and
+                self.filament_source.currentData() == 'custom'):
+            self._choose_quick_profile()
+        if result == dialog.DialogCode.Accepted and dialog.palette_path is not None:
+            self.library_palette_ready.emit(str(dialog.palette_path))
 
     def _source_settings(self):
         return (self.plan_preferences.get('source'), self.plan_preferences.get('custom'))

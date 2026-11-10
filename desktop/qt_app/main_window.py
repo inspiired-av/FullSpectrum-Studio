@@ -784,6 +784,7 @@ class MainWindow(QMainWindow):
         self.custom_library_path = self.filaments_panel.custom_library_path
         self.custom_library_browse = self.filaments_panel.custom_library_browse
         self.custom_library_browse.clicked.connect(self._browse_custom_library)
+        self.filaments_panel.library_palette_ready.connect(self._activate_library_palette)
         # Export widgets must exist before _plan_tab restores and wires preferences.
         self.export_settings_panel = self._build_export_settings()
         # Start compact before Qt evaluates minimum size hints: the legacy
@@ -1797,6 +1798,35 @@ class MainWindow(QMainWindow):
             self.export_preferences_row.setVisible(dirty)
         if hasattr(self, 'results_panel'):
             self._refresh_results_context()
+
+    def _activate_library_palette(self, path):
+        """Apply a selected quick profile through the established engine source.
+
+        No existing inventory, Bambu library, external JSON or export project is
+        modified; the app-managed active palette is a normal custom library.
+        """
+        from desktop.qt_app.filament_library_store import active_file
+        path = str(Path(path).resolve())
+        if Path(path) != active_file().resolve():
+            QMessageBox.warning(self, 'Unsafe Palette Path',
+                                'Only the app-managed active palette may be selected here.')
+            return
+        self._hold_filament_forecast()
+        self.custom_library_path.setText(path)
+        self._update_plan_value('custom', path)
+        index = self.filament_source.findData('custom')
+        if index < 0:
+            QMessageBox.warning(self, 'Custom Source Missing',
+                                'The Custom filament library source is unavailable.')
+            return
+        if self.filament_source.currentIndex() != index:
+            self.filament_source.setCurrentIndex(index)
+        else:
+            # Content may have changed while path stays identical.
+            self._invalidate_forecast()
+            self.filaments_panel.load_options(force=True)
+        self.statusBar().showMessage(
+            'Quick palette selected. Save Filaments to persist your source and Use/Require choices.')
 
     def _browse_custom_library(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose Filament Library", "",
@@ -3471,8 +3501,26 @@ class MainWindow(QMainWindow):
             if not self._show_previous_forecast():
                 self.forecast_palette_label.setText('No forecast yet')
                 self.forecast_palette_label.setStyleSheet('')
-            self._set_forecast_status('Forecast unavailable: ' + str(error), 'error')
-            self.results_panel.record_event('Live forecast', str(error), 'warning')
+            # Smart Quality can retry the same invalid physical-slot count
+            # several times. Explain the one actionable configuration issue.
+            from desktop.qt_app.filament_forecast_errors import describe_forecast_failure
+            panel = getattr(self, 'filaments_panel', None)
+            if panel is None:
+                # Older forecast behavior tests use a lightweight window
+                # harness without FilamentsTab. Keep their error presentation
+                # contract without weakening the real app's richer guidance.
+                self._set_forecast_status('Forecast unavailable: ' + str(error), 'error')
+                self.results_panel.record_event('Live forecast', str(error), 'warning')
+                return
+            options = getattr(panel, 'options', ())
+            disabled = getattr(getattr(panel, 'preferences', None), 'disabled', set())
+            enabled_colors = len({str(option.get('color', '')).upper()
+                                  for option in options if option.get('key') not in disabled})
+            message = describe_forecast_failure(
+                error, self.plan_preferences.get('real_slots'),
+                enabled_colors if options else None)
+            self._set_forecast_status('Forecast unavailable: ' + message, 'error')
+            self.results_panel.record_event('Live forecast', message, 'warning')
             return
         if not self._forecast_view.accept(self.state.model_path, result):
             return  # Do not reuse a forecast for another model.
