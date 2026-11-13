@@ -48,6 +48,18 @@ class FilamentPreferences:
         if not pinned <= enabled:
             raise ValueError('Required filaments must also have Use checked.')
         assigned_targets=set(self.solid_assignments.values())
+        # A color-only optimizer cannot count two same-HEX filaments as
+        # independent required mixing anchors, even if their IDs differ.
+        required=pinned | (assigned_targets & keys)
+        color_by_key={str(item['key']):str(item.get('color','')).upper() for item in options}
+        seen_required_colors={}
+        for key in sorted(required):
+            color=color_by_key.get(key)
+            if color in seen_required_colors and seen_required_colors[color]!=key:
+                raise ValueError(
+                    'Two required filaments have the same displayed HEX color. '
+                    'Choose one physical variant as Required; both may remain enabled.')
+            seen_required_colors[color]=key
         if any(key in keys and key not in enabled for key in assigned_targets):
             raise ValueError('An assigned filament cannot be excluded; remove its source-color assignment first.')
         if len(pinned | assigned_targets) > int(max_slots):

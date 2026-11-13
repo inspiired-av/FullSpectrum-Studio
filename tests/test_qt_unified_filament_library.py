@@ -76,7 +76,9 @@ class UnifiedLibraryStorageTests(unittest.TestCase):
         merged=library.merged_filaments(personal=[one,two])
         self.assertIn('personal:001',{r['id'] for r in merged})
         self.assertIn('personal:002',{r['id'] for r in merged})
-        with self.assertRaisesRegex(ValueError,'cannot distinguish'):
+        # Same-HEX variants are distinct records, but a printable palette still
+        # requires at least two different *colors* (not merely two products).
+        with self.assertRaisesRegex(ValueError,'at least two'):
             library.activate_palette([one,two])
 
     def test_two_distinct_colors_activate_in_engine_format(self):

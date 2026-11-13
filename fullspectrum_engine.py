@@ -956,6 +956,7 @@ def custom_palette(path):
     if not isinstance(items,list):
         raise RuntimeError("Custom palette must contain a JSON list or a filaments list.")
     options=[]
+    seen_variant_ids=set()
     for item in items:
         if not isinstance(item,dict) or not re.match(r"^#[0-9A-Fa-f]{6}$",hx(item.get("color",""))):
             continue
@@ -966,7 +967,7 @@ def custom_palette(path):
             initial=float(item["initialGrams"]) if item.get("initialGrams") is not None else remaining
         except (TypeError,ValueError):
             remaining=initial=None
-        options.append({
+        candidate={
             "name":str(item.get("name") or family),
             "series":family,
             "brand":str(item.get("brand") or "Custom"),
@@ -976,7 +977,39 @@ def custom_palette(path):
             "remainingGrams":remaining,
             "initialGrams":initial,
             "availability":"user-supplied",
-        })
+        }
+        variant_id=item.get('id')
+        if variant_id is not None:
+            if not isinstance(variant_id,str) or not re.fullmatch(r'[A-Za-z0-9:_.-]{1,120}',variant_id):
+                raise RuntimeError('Custom palette has an invalid stable filament ID.')
+            if variant_id in seen_variant_ids:
+                raise RuntimeError('Custom palette contains duplicate stable filament IDs: '+variant_id)
+            seen_variant_ids.add(variant_id)
+            candidate['variant_id']=variant_id
+        options.append(candidate)
+    # Legacy series|HEX keys remain unchanged for all non-colliding rows.
+    # Only real collisions switch to unambiguous, stable per-variant keys;
+    # this preserves existing disabled/pinned preferences on old palettes.
+    collisions={}
+    for option in options:
+        collisions.setdefault((option['series'],option['color']),[]).append(option)
+    for alternatives in collisions.values():
+        if len(alternatives)<2:
+            continue
+        identified=[candidate for candidate in alternatives if 'variant_id' in candidate]
+        if not identified:
+            # Backward compatibility: pre-Stage-2A palettes did not assign IDs.
+            # Their identical series|HEX entries retain one legacy selector
+            # key; the existing selector adapter deduplicates by that key.
+            # Do not invent a product identity from position or display name.
+            continue
+        if len(identified)!=len(alternatives):
+            # Partially identified collisions cannot be matched to a physical
+            # filament deterministically. Require stable IDs for every member.
+            raise RuntimeError('Multiple filaments share the same PLA profile and HEX. '
+                               'Assign a unique stable id to each matching filament before planning.')
+        for candidate in alternatives:
+            candidate['identity_collision']=True
     if len({item["color"] for item in options}) < MIN_REAL_SLOTS:
         raise RuntimeError("Custom palette needs at least two distinct valid colors.")
     return options
@@ -2034,6 +2067,8 @@ def anchor_color(anchor):
     return anchor["color"]
 
 def anchor_key(anchor):
+    if anchor.get('identity_collision') and anchor.get('variant_id'):
+        return anchor['variant_id']
     return f"{str(anchor.get('series') or filament_family(anchor_name(anchor))).strip()}|{anchor_color(anchor)}"
 
 def anchor_option_payload(anchor):
@@ -2102,8 +2137,10 @@ def anchor_matches_key(anchor, key):
     if not normalized:
         return False
     lowered=normalized.lower()
+    legacy=f"{str(anchor.get('series') or filament_family(anchor_name(anchor))).strip()}|{anchor_color(anchor)}"
     return (
         anchor_key(anchor).lower()==lowered
+        or legacy.lower()==lowered
         or anchor_color(anchor).lower()==lowered
         or anchor_name(anchor).lower()==lowered
     )
@@ -2112,11 +2149,24 @@ def resolve_pinned_anchors(pool, anchor_keys):
     resolved=[]
     missing=[]
     for key in normalize_anchor_keys(anchor_keys):
-        match=next((candidate for candidate in pool if anchor_matches_key(candidate,key)),None)
-        if match is None:
+        matches=[candidate for candidate in pool if anchor_matches_key(candidate,key)]
+        if not matches:
             missing.append(key)
             continue
-        if anchor_color(match) not in {anchor_color(anchor) for anchor in resolved}:
+        if len(matches)>1:
+            raise RuntimeError(
+                'A required filament matches multiple physical variants ('+str(key)+'). '
+                'Choose a specific filament by its stable variant ID.')
+        match=matches[0]
+        for other in resolved:
+            if anchor_color(other)==anchor_color(match):
+                if anchor_key(other)==anchor_key(match):
+                    break
+                raise RuntimeError(
+                    'Two required filaments use the same displayed HEX color. '
+                    'The current color optimizer cannot use both as independent '
+                    'mixing anchors; require one of these variants.')
+        else:
             resolved.append(match)
     if missing:
         raise RuntimeError(
@@ -2377,9 +2427,13 @@ def select_anchors(old_colors, usage, mode, inventory, palette_source, real_slot
         raise RuntimeError(f"{len(pinned_anchors)} manual anchors were selected, but Physical slots is {requested}.")
     used,total,targets,target_total=weighted_color_targets(old_colors,usage,reference,quality_bias)
     if mode!="cmykw":
+        # Only a single physical candidate per displayed color reaches the
+        # optical planner. If pinned, its explicit variant ID takes priority.
+        required={anchor_key(anchor) for anchor in pinned_anchors}
+        pool.sort(key=lambda candidate: 0 if anchor_key(candidate) in required else 1)
         pool=shortlist_anchor_pool(pool,targets,target_total,anchor_pool_limit_for_quality(quality_bias,planner_mode))
         for anchor in reversed(pinned_anchors):
-            if anchor_color(anchor) not in {anchor_color(candidate) for candidate in pool}:
+            if anchor_key(anchor) not in {anchor_key(candidate) for candidate in pool}:
                 pool.insert(0,anchor)
     else:
         pool=unique_palette_options(pool)

@@ -190,6 +190,7 @@ class FilamentEntryDialog(QDialog):
     def __init__(self, record=None, parent=None):
         super().__init__(parent)
         record=record or {}
+        self._original_record = dict(record)
         self.editing=bool(record)
         self.setWindowTitle('Edit Custom Filament' if record else 'Add Custom Filament')
         self.setMinimumWidth(420)
@@ -237,6 +238,27 @@ class FilamentEntryDialog(QDialog):
         form.addRow('Finish',self.finish)
         form.addRow('Optical type',self.optics)
         form.addRow('HEX',color_box)
+        self.sku = QLineEdit(record.get('sku', ''))
+        self.sku.setPlaceholderText('Optional manufacturer SKU')
+        self.product_series = QLineEdit(record.get('product_series', ''))
+        self.product_series.setPlaceholderText('Optional manufacturer product family')
+        self.manufacturer_url = QLineEdit(record.get('manufacturer_url', ''))
+        self.manufacturer_url.setPlaceholderText('Optional manufacturer color source URL')
+        self.color_provenance = QComboBox()
+        for label, value in (('User entered', 'user-entered'),
+                             ('Manufacturer published', 'manufacturer-published'),
+                             ('Slicer reported', 'slicer-reported'),
+                             ('Approximate', 'approximate')):
+            self.color_provenance.addItem(label, value)
+        current_provenance = record.get('color_source', 'user-entered')
+        if self.color_provenance.findData(current_provenance) < 0:
+            self.color_provenance.addItem(str(current_provenance), current_provenance)
+        self.color_provenance.setCurrentIndex(
+            self.color_provenance.findData(current_provenance))
+        form.addRow('Product family', self.product_series)
+        form.addRow('SKU', self.sku)
+        form.addRow('Color provenance', self.color_provenance)
+        form.addRow('Manufacturer source URL', self.manufacturer_url)
         layout.addLayout(form)
         self.buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save |
                                       QDialogButtonBox.StandardButton.Cancel)
@@ -258,12 +280,23 @@ class FilamentEntryDialog(QDialog):
         if chosen.isValid():self.color.setText(chosen.name().upper())
 
     def _accept(self):
-        data={'name':self.name.text(),'brand':self.brand.text(),
-              'material':self.material.currentText(),
-              'series':self.series.currentText() if self.material.currentText()=='PLA' else 'PLA Basic',
-              'color':self.color.text(),'finish':self.finish.text(),
-              'optics':self.optics.currentText(),'source':'personal',
-              'color_source':'user-entered'}
+        # Start with the validated existing record, not just the visible text
+        # fields. This retains independent preset references and optical data.
+        data=dict(self._original_record)
+        data.update({'name':self.name.text(),'brand':self.brand.text(),
+                     'material':self.material.currentText(),
+                     'series':self.series.currentText() if self.material.currentText()=='PLA' else 'PLA Basic',
+                     'color':self.color.text(),'finish':self.finish.text(),
+                     'optics':self.optics.currentText(),'source':'personal',
+                     'color_source':self.color_provenance.currentData()})
+        for field, widget in (('sku', self.sku),
+                              ('product_series', self.product_series),
+                              ('manufacturer_url', self.manufacturer_url)):
+            value=widget.text().strip()
+            if value:
+                data[field]=value
+            else:
+                data.pop(field,None)
         if self.previous_id:data['id']=self.previous_id
         try:self.entry=normalize(data,personal=True)
         except ValueError as exc:

@@ -106,7 +106,10 @@ def normalize(entry, *, personal=False):
     for key in ('sku', 'preset', 'filamentID', 'source_ref', 'product_series'):
         if key in entry and entry[key] is not None:
             result[key] = _text(entry[key], key, 200)
-    return result
+    # Stage 2A.2: retain explicitly validated v2 metadata alongside v1 fields.
+    # The planner still receives the same series/HEX representation.
+    from desktop.qt_app.filament_metadata_v2 import retain_optional_metadata
+    return retain_optional_metadata(entry, result)
 
 
 def _validate_records(items, *, personal=False):
@@ -286,18 +289,17 @@ def _active_entries(records):
     clean=_validate_records(records)
     if any(item['material'] != 'PLA' for item in clean):
         raise ValueError('Non-PLA filaments are experimental and cannot be exported by this PLA optimizer')
-    engine_keys=[(item['series'],item['color']) for item in clean]
-    if len(engine_keys) != len(set(engine_keys)):
-        raise ValueError('Two selected filaments share the same PLA profile and HEX. '
-                         'The current optimizer cannot distinguish them as physical slots; '
-                         'choose one of the alternatives for this palette.')
+    # Stage 2A.3: a palette contains selectable *variants*, not unique
+    # (family, HEX) pairs. Each normalized record already has a unique ID.
+    # The engine will treat colliding colors as alternative physical choices,
+    # not incorrectly count them as distinct colors or mixture anchors.
     if len(clean) < 2 or len({entry['color'] for entry in clean}) < 2:
         raise ValueError('Active palette needs at least two different colors')
     if len(clean) > 32:
         raise ValueError('An active palette cannot exceed 32 candidates')
     result=[]
     for item in clean:
-        entry={key:item[key] for key in ('name','brand','series','color')}
+        entry={key:item[key] for key in ('id','name','brand','series','color')}
         for optional in ('preset','filamentID'):
             if item.get(optional): entry[optional]=item[optional]
         result.append(entry)
@@ -508,3 +510,25 @@ def import_profile(path, *, name=None, replace_profile_id=None,
                              expected_revision=expected_revision)
         return replace_profile_id
     return save_profile(title, items)
+
+
+# Stage 2A: read-only schema v2 projection; v1 remains the active optimizer
+# and saved palette format until native preset/variant resolution is validated.
+def build_identity_index_v2(*, catalog):
+    """Project loaded Bambu/Orca catalog results and app-owned v1 data to v2.
+
+    Pass catalog explicitly: the UI worker should provide its already-scanned
+    results rather than triggering an expensive synchronous scan here.
+    """
+    from desktop.qt_app.filament_identity_v2 import project_legacy_state
+    personal, _ = read_personal()
+    return project_legacy_state(generic=generic_filaments(), catalog=catalog,
+                                personal=personal, profiles=profile_choices())
+
+
+def export_identity_index_v2(*, catalog, expected_revision=None):
+    """Opt-in schema v2 index write; does not modify v1 or slicer files."""
+    from desktop.qt_app.filament_identity_v2 import write_index
+    return write_index(build_identity_index_v2(catalog=catalog),
+                       path=library_root() / 'catalog_index_v2.json',
+                       expected_revision=expected_revision)
