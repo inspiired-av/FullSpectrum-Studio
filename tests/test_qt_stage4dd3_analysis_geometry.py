@@ -88,7 +88,7 @@ class AnalysisPlacementTests(unittest.TestCase):
 
     def test_engine_uses_placed_preview_and_rebuilds_cache(self):
         text = (ROOT/'fullspectrum_engine.py').read_text(encoding='utf-8')
-        self.assertIn('PREVIEW_CACHE_VERSION = 2', text)
+        self.assertIn('PREVIEW_CACHE_VERSION = 3', text)
         block = text.split('def reduced_preview_geometry(', 1)[1].split('\ndef export_preview_mesh(', 1)[0]
         self.assertIn('from preview_world_geometry import preview_geometry', block)
         self.assertIn('preview_geometry(', block)

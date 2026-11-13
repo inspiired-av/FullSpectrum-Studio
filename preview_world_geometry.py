@@ -14,6 +14,7 @@ import math
 import posixpath
 import xml.etree.ElementTree as ET
 from xml.sax import make_parser, handler
+from native_part_slot_defaults import read_part_slot_defaults
 
 IDENTITY = (1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0.)
 UNIT_SCALES = {'millimeter': 1., 'centimeter': 10., 'meter': 1000.,
@@ -146,6 +147,7 @@ def model_instances(archive, slot_count):
         raise ValueError('3MF analysis preview has no build items')
     scale = UNIT_SCALES.get(root.unit, 1.)
     extruders = _object_extruders(archive, slot_count)
+    part_extruders = read_part_slot_defaults(archive, slot_count)
     cache = {root_name: root}
     instances = []
 
@@ -165,8 +167,11 @@ def model_instances(archive, slot_count):
             if len(instances) > MAX_INSTANCES:
                 raise ValueError('Too many 3MF preview instances')
         for child_id, raw_path, raw_transform in obj['components']:
+            # Native Bambu/Orca part metadata overrides the parent extruder.
+            # Keep explicit paint_color handling at individual mesh faces.
+            child_slot = part_extruders.get((object_id, child_id), slot)
             visit(_path(member, raw_path), child_id,
-                  _compose(transform, _matrix(raw_transform)), slot,
+                  _compose(transform, _matrix(raw_transform)), child_slot,
                   active | {(member, object_id)}, depth + 1)
 
     for oid, transform in root.items:
