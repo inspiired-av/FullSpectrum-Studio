@@ -73,6 +73,11 @@ def _validate_options(plan, engine, loader):
     if not standard and Path(plan.model).suffix.lower() == '.3mf' and s.get('native_project_template'):
         raise ValueError('Native 3MF input already contains slicer settings; clear the template to preserve them.')
     options = (loader or _available_keys)(engine, source, custom) or []
+    from desktop.qt_app.filament_legacy_selection import (
+        find_legacy_selection_conflicts, unresolved_message)
+    conflicts = find_legacy_selection_conflicts(options, plan.disabled, plan.pinned)
+    if conflicts:
+        raise ValueError(unresolved_message(conflicts))
     available = {str(item['key']) for item in options}
     enabled = available - plan.disabled
     if source != 'exact-cmykw' and len({str(item.get('color','')).upper()

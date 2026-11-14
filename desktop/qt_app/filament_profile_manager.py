@@ -20,11 +20,8 @@ class ProfileFilamentPicker(QDialog):
         self.setWindowTitle('Add Filaments to Profile')
         self.resize(600, 460)
         self.selected_records = []
-        reserved_ids={r['id'] for r in existing}
-        reserved_keys={(r['series'],r['color']) for r in existing}
-        self.records=[r for r in records
-                      if r['material']=='PLA' and r['id'] not in reserved_ids
-                      and (r['series'],r['color']) not in reserved_keys]
+        from desktop.qt_app.filament_variant_profile_selection import available_profile_variants
+        self.records = available_profile_variants(records, existing)
         layout=QVBoxLayout(self)
         layout.addWidget(QLabel('Choose one or more filaments to add to this profile.'))
         self.search=QLineEdit(self)
@@ -67,10 +64,7 @@ class ProfileFilamentPicker(QDialog):
              if not item.isHidden()}
         self.selected_records=[r for r in self.records if r['id'] in ids]
         if not self.selected_records:return
-        if len({(r['series'],r['color']) for r in self.selected_records})!=len(self.selected_records):
-            QMessageBox.warning(self,'Conflicting Filaments',
-                'The selected entries contain duplicate slicer-family and HEX identities.')
-            return
+        # Entries are distinguished by stable variant ID, not family + HEX.
         self.accept()
 
 

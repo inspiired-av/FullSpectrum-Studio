@@ -33,6 +33,24 @@ class FilamentPreferences:
     def is_pinned(self, key):
         return key in self.pinned
 
+    def legacy_conflicts(self, options):
+        """Identify ambiguous saved family/HEX keys without changing any selection."""
+        from desktop.qt_app.filament_legacy_selection import find_legacy_selection_conflicts
+        return find_legacy_selection_conflicts(options, self.disabled, self.pinned)
+
+    def acknowledge_legacy_conflicts(self, options):
+        """Retire only reviewed legacy keys after explicit Save Filaments confirmation."""
+        from desktop.qt_app.filament_legacy_selection import keys_to_retire
+        conflicts = self.legacy_conflicts(options)
+        if not conflicts:
+            return ()
+        retired = keys_to_retire(conflicts)
+        self.disabled.difference_update(retired)
+        self.pinned.difference_update(retired)
+        self._dirty = (self.disabled != set(self.saved.get('disabled_anchor_keys', []))
+                       or self.pinned != set(self.saved.get('pinned_anchor_keys', [])))
+        return conflicts
+
     def apply(self, options, enabled_keys, pinned_keys, max_slots=6):
         """Validate changes, then merge only keys belonging to THIS source.
 

@@ -86,6 +86,11 @@ def run_plan(request: ForecastRequest, engine=None, options_loader=None, progres
         raise ValueError('The existing optimizer only supports protected color assignments on standard material-colored 3MFs. Native-project protections are not passed to planning yet.')
     loader = options_loader or _available_keys
     options = loader(engine, source, custom) or []
+    from desktop.qt_app.filament_legacy_selection import (
+        find_legacy_selection_conflicts, unresolved_message)
+    conflicts = find_legacy_selection_conflicts(options, request.disabled, request.pinned)
+    if conflicts:
+        raise ValueError(unresolved_message(conflicts))
     available = {str(option['key']) for option in options}
     enabled = available - request.disabled
     pinned = sorted(request.pinned & enabled)

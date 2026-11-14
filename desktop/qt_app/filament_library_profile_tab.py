@@ -173,17 +173,9 @@ class FilamentProfileTab(QWidget):
                     for i in self.available.selectedItems()}
         self.available.clear()
         self._catalog = {}
-        current_ids = {r['id'] for r in self._items}
-        current_keys = {(r['series'], r['color']) for r in self._items}
-        seen_ids = set()
-        for r in [*self.library_records, *self._saved_profile_entries]:
-            if r['id'] in seen_ids:
-                continue
-            seen_ids.add(r['id'])
-            if r['material'] != 'PLA' or r['id'] in current_ids:
-                continue
-            if (r['series'], r['color']) in current_keys:
-                continue  # Engine cannot distinguish duplicate series+HEX.
+        from desktop.qt_app.filament_variant_profile_selection import available_profile_variants
+        for r in available_profile_variants(
+                [*self.library_records, *self._saved_profile_entries], self._items):
             self._catalog[r['id']] = r
             item = _filament_item(r)
             self.available.addItem(item)
@@ -343,24 +335,16 @@ class FilamentProfileTab(QWidget):
         self.profile_heading.setText('PROFILE FILAMENTS' if not label else f'PROFILE FILAMENTS · {len(self._items)}')
 
     def _add_selected(self):
-        existing_ids = {r['id'] for r in self._items}
-        existing_keys = {(r['series'], r['color']) for r in self._items}
-        additions = []
-        for widget in self.available.selectedItems():
-            r = self._catalog[widget.data(Qt.ItemDataRole.UserRole)]
-            if r['id'] in existing_ids:
-                continue
-            key = (r['series'], r['color'])
-            if key in existing_keys:
-                QMessageBox.warning(self, 'Duplicate Filament Color',
-                    'Two entries with the same PLA slicer family and HEX cannot both be active. '
-                    'Choose one brand for this palette.')
-                return
-            additions.append(r)
-            existing_ids.add(r['id'])
-            existing_keys.add(key)
-        if additions:
-            self._items.extend(additions)
+        from desktop.qt_app.filament_variant_profile_selection import append_profile_variants
+        additions = [self._catalog[widget.data(Qt.ItemDataRole.UserRole)]
+                     for widget in self.available.selectedItems()]
+        try:
+            updated = append_profile_variants(self._items, additions)
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid Filament Selection', str(exc))
+            return
+        if updated != self._items:
+            self._items = updated
             self._dirty = True
             self._redraw()
 

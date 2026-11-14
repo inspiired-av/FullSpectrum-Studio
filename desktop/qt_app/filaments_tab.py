@@ -519,15 +519,23 @@ class FilamentsTab(QWidget):
             return
         self._population_active = False
         self._changing = False
-        self.selection_is_valid = True
-        self.selection_error = ''
+        conflicts = self.preferences.legacy_conflicts(self.options)
+        self.selection_is_valid = not bool(conflicts)
+        from desktop.qt_app.filament_legacy_selection import unresolved_message
+        self.selection_error = unresolved_message(conflicts)
         self.load_progress.setVisible(False)
         self._filter()
         self._refresh_targets()
         self._sync_assignment_widgets()
-        # Emit success only after table rows and search are fully usable.
+        if conflicts:
+            self.summary.setText('Review saved filament selection · Save Filaments to resolve')
+            self.source_info.setText(self.selection_error)
+        # This still signals a successfully loaded source; setup policy reads
+        # selection_is_valid separately and blocks forecast/export.
         self.activity_event.emit('success', 'Filament source',
                                  f'Loaded {len(self.options)} available filament colors.')
+        if conflicts:
+            self.activity_event.emit('info', 'Saved filament selection', self.selection_error)
 
     def _toggle_enabled(self, index, checked):
         if self._changing:
@@ -569,7 +577,7 @@ class FilamentsTab(QWidget):
                   and (o['key'] not in assigned or o['key'] in self.preferences.pinned)}
         return enabled, pinned
 
-    def _accept_table(self, show_error):
+    def _accept_table(self, show_error, *, allow_legacy_pending=False):
         if not self.options:
             self.selection_error = ''
             return True
@@ -584,7 +592,16 @@ class FilamentsTab(QWidget):
             if show_error:
                 QMessageBox.warning(self, 'Invalid Filament Selection', str(exc))
             return False
+        from desktop.qt_app.filament_legacy_selection import unresolved_message
+        conflicts = self.preferences.legacy_conflicts(self.options)
+        if conflicts and not allow_legacy_pending:
+            self.selection_error = unresolved_message(conflicts)
+            if show_error:
+                QMessageBox.warning(self, 'Saved Filament Selection Needs Review',
+                                    self.selection_error)
+            return False
         self.selection_error = ''
+        # An acknowledged selection can proceed normally.
         return True
 
     def _sync_status(self, table_pending=False):
@@ -736,8 +753,23 @@ class FilamentsTab(QWidget):
         self._update_actions()  # Recompute selected-row bulk button states.
 
     def save(self):
-        if not self._accept_table(True):
+        if not self._accept_table(True, allow_legacy_pending=True):
             return
+        conflicts = self.preferences.legacy_conflicts(self.options)
+        if conflicts:
+            from desktop.qt_app.filament_legacy_selection import review_text, unresolved_message
+            enabled, pinned = self._read_rows()
+            approval = QMessageBox.question(
+                self, 'Review Legacy Filament Selections',
+                review_text(conflicts, enabled, pinned),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if approval != QMessageBox.StandardButton.Yes:
+                self.selection_is_valid = False
+                self.selection_error = unresolved_message(conflicts)
+                self.planning_changed.emit(False)
+                return
+            self.preferences.acknowledge_legacy_conflicts(self.options)
         try:
             # Persist only source/library choices, not unrelated unsaved edits
             # elsewhere on Plan. Both tabs share the same versioned settings.
@@ -753,11 +785,17 @@ class FilamentsTab(QWidget):
         except (OSError,ValueError) as exc:
             QMessageBox.warning(self,'Unable to Save Filaments',str(exc))
             return
+        if conflicts:
+            self.selection_is_valid = True
+            self.selection_error = ''
+            self.source_info.setText('Filament source: ' + self._source_settings()[0].replace('-', ' ').title())
         self._sync_status()
         if hasattr(self.window(), '_update_plan_dirty_state'):
             self.window()._update_plan_dirty_state()
         self.activity_event.emit('success', 'Filaments', 'Filament selections and requirements saved.')
         self._update_actions()
+        if conflicts:
+            self.planning_changed.emit(True)  # Re-enable forecast only after explicit review.
 
     def revert(self):
         self.preferences.revert()
